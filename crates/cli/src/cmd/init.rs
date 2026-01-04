@@ -115,8 +115,8 @@ fn initialize_jj_if_needed(
 
     println!("{} Created .jj/ workspace", "✓".green());
 
-    // Configure bookmarks for timelapse workflow
-    if let Err(e) = jj::configure_jj_bookmarks(repo_root) {
+    // Configure bookmarks for timelapse workflow (using native config API)
+    if let Err(e) = jj::configure_jj_native(repo_root) {
         println!(
             "{} Warning: Could not configure JJ bookmarks: {}",
             "!".yellow(),

@@ -4,7 +4,7 @@
 //! and materializing it to a filesystem directory.
 
 use anyhow::{Context, Result};
-use jj_lib::backend::{MergedTreeId, ObjectId, TreeValue};
+use jj_lib::backend::{MergedTreeId, TreeValue};
 use jj_lib::merged_tree::MergedTree;
 use jj_lib::repo_path::RepoPath;
 use jj_lib::store::Store;
@@ -46,7 +46,7 @@ fn export_tree_entries(
     jj_store: &Arc<Store>,
     tree: &MergedTree,
     target_dir: &Path,
-    current_path: &RepoPath,
+    _current_path: &RepoPath,
 ) -> Result<()> {
     // MergedTree.entries() returns Iterator<Item=(RepoPathBuf, Merge<Option<TreeValue>>)>
     for (entry_path, merge_value) in tree.entries() {

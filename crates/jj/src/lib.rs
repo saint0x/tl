@@ -22,7 +22,9 @@ pub use materialize::{CommitMessageOptions, PublishOptions};
 pub use publish::{publish_checkpoint, publish_range};
 pub use workspace::{validate_workspace_name, JjWorkspace, WorkspaceManager, WorkspaceState};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use jj_lib::backend::ObjectId;    // For CommitId parsing
+use jj_lib::repo::Repo;            // For Repo trait methods
 use std::path::{Path, PathBuf};
 
 /// Errors specific to JJ integration
@@ -225,4 +227,202 @@ pub fn check_jj_binary() -> Result<bool> {
         Ok(output) => Ok(output.status.success()),
         Err(_) => Ok(false),
     }
+}
+
+/// Create a JJ bookmark (branch) using native jj-lib APIs
+///
+/// Creates a bookmark pointing to the specified commit. The bookmark name
+/// is automatically prefixed with "snap/" if not already prefixed.
+///
+/// # Arguments
+///
+/// * `workspace` - JJ workspace (must be loaded)
+/// * `bookmark_name` - Name of the bookmark to create (e.g., "feature" or "snap/feature")
+/// * `commit_id` - Hex string of the commit ID to point the bookmark at
+///
+/// # Errors
+///
+/// Returns `JjError::OperationFailed` if bookmark creation fails.
+pub fn create_bookmark_native(
+    workspace: &mut jj_lib::workspace::Workspace,
+    bookmark_name: &str,
+    commit_id: &str,
+) -> Result<()> {
+    use jj_lib::backend::CommitId;
+    use jj_lib::op_store::RefTarget;
+
+    // Load user settings and repo
+    let config = config::Config::builder().build()
+        .map_err(|e| JjError::OperationFailed(format!("Failed to create config: {}", e)))?;
+    let user_settings = jj_lib::settings::UserSettings::from_config(config);
+
+    let repo = workspace.repo_loader().load_at_head(&user_settings)
+        .context("Failed to load repo")?;
+
+    // Parse commit ID using ObjectId trait
+    let commit_id_bytes = hex::decode(commit_id)
+        .context("Invalid commit ID hex string")?;
+    let commit_id = CommitId::from_bytes(&commit_id_bytes);
+
+    // Ensure snap/ prefix
+    let full_name = if bookmark_name.starts_with("snap/") {
+        bookmark_name.to_string()
+    } else {
+        format!("snap/{}", bookmark_name)
+    };
+
+    // Start transaction
+    let mut tx = repo.start_transaction(&user_settings);
+    let mut_repo = tx.mut_repo();
+
+    // Check if bookmark exists (using Repo trait)
+    let view = Repo::view(mut_repo);
+    if view.get_local_branch(&full_name).is_present() {
+        anyhow::bail!("Bookmark '{}' already exists", full_name);
+    }
+
+    // Set bookmark target (using MutableRepo method)
+    mut_repo.set_local_branch_target(&full_name, RefTarget::normal(commit_id));
+
+    // Commit transaction (returns Arc<ReadonlyRepo>, no Result to handle)
+    let _committed_repo = tx.commit("Create bookmark");
+
+    Ok(())
+}
+
+/// Configure JJ repository settings using native config APIs
+///
+/// Sets up JJ configuration for:
+/// - Bookmark prefix for timelapse snapshots (snap/)
+/// - Default revset for log display
+/// - Empty default commit description
+///
+/// # Errors
+///
+/// Returns `JjError::OperationFailed` if configuration fails.
+pub fn configure_jj_native(repo_root: &Path) -> Result<()> {
+    use std::fs;
+
+    // JJ stores repo-level config in .jj/repo/config.toml
+    let config_path = repo_root.join(".jj/repo/config.toml");
+
+    // Ensure parent directory exists
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent)
+            .context("Failed to create .jj/repo directory")?;
+    }
+
+    // Create TOML config content
+    let config_content = r#"# Timelapse JJ Configuration
+
+[revsets]
+log = "bookmarks() | @"
+
+[git]
+push-bookmark-prefix = "snap/"
+
+[ui]
+default-description = ""
+"#;
+
+    // Write config file (overwrites if exists, but that's fine - we want these settings)
+    fs::write(&config_path, config_content)
+        .context("Failed to write JJ config")?;
+
+    Ok(())
+}
+
+/// Add a JJ workspace using native jj-lib APIs
+///
+/// Creates a new workspace in the JJ repository. Workspaces allow multiple
+/// working copies of the same repository with independent working states.
+///
+/// # Arguments
+///
+/// * `repo_root` - The main repository root
+/// * `workspace_name` - Name of the new workspace
+/// * `workspace_path` - Path where the workspace should be created
+///
+/// # Errors
+///
+/// Returns `JjError::OperationFailed` if workspace creation fails.
+pub fn add_workspace_native(
+    repo_root: &Path,
+    workspace_name: &str,
+    workspace_path: &Path,
+) -> Result<()> {
+    use jj_lib::workspace::Workspace;
+
+    // Load main workspace and repo
+    let workspace = load_workspace(repo_root)?;
+
+    let config = config::Config::builder().build()
+        .map_err(|e| JjError::OperationFailed(format!("Failed to create config: {}", e)))?;
+    let user_settings = jj_lib::settings::UserSettings::from_config(config);
+    let repo = workspace.repo_loader().load_at_head(&user_settings)
+        .context("Failed to load repo")?;
+
+    // Use default working copy initializer
+    let working_copy_initializer = jj_lib::workspace::default_working_copy_initializer();
+
+    // Convert workspace name to WorkspaceId
+    let workspace_id = jj_lib::op_store::WorkspaceId::new(workspace_name.to_string());
+
+    // Call the official API with correct parameter order:
+    // init_workspace_with_existing_repo(user_settings, workspace_root, repo, initializer, workspace_id)
+    let (_new_workspace, _new_repo) = Workspace::init_workspace_with_existing_repo(
+        &user_settings,
+        workspace_path,
+        &repo,
+        working_copy_initializer,
+        workspace_id,
+    ).map_err(|e| JjError::OperationFailed(format!("Failed to add workspace: {}", e)))?;
+
+    Ok(())
+}
+
+/// Forget (remove) a JJ workspace using native jj-lib APIs
+///
+/// Removes a workspace from JJ tracking. This does not delete the workspace
+/// directory or its files - it only removes JJ's awareness of the workspace.
+///
+/// # Arguments
+///
+/// * `repo_root` - The main repository root
+/// * `workspace_name` - Name of the workspace to forget
+///
+/// # Errors
+///
+/// Returns `JjError::OperationFailed` if workspace removal fails.
+pub fn forget_workspace_native(
+    repo_root: &Path,
+    workspace_name: &str,
+) -> Result<()> {
+    // Load workspace and repo
+    let workspace = load_workspace(repo_root)?;
+
+    let config = config::Config::builder().build()
+        .map_err(|e| JjError::OperationFailed(format!("Failed to create config: {}", e)))?;
+    let user_settings = jj_lib::settings::UserSettings::from_config(config);
+    let repo = workspace.repo_loader().load_at_head(&user_settings)
+        .context("Failed to load repo")?;
+
+    // Convert to WorkspaceId
+    let ws_id = jj_lib::op_store::WorkspaceId::new(workspace_name.to_string());
+
+    // Check if workspace exists by checking for its wc commit
+    let view = Repo::view(repo.as_ref());
+    if view.get_wc_commit_id(&ws_id).is_none() {
+        anyhow::bail!("Workspace '{}' not found", workspace_name);
+    }
+
+    // Start transaction to remove workspace
+    let mut tx = repo.start_transaction(&user_settings);
+    tx.mut_repo().remove_wc_commit(&ws_id);
+
+    // Commit transaction (returns Arc<ReadonlyRepo>, no Result to handle)
+    let description = format!("forget workspace '{}'", workspace_name);
+    let _committed_repo = tx.commit(&description);
+
+    Ok(())
 }

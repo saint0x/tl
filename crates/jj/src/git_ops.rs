@@ -4,7 +4,6 @@
 //! using jj-lib's native functions that handle git2 internally.
 
 use anyhow::{anyhow, Context, Result};
-use jj_lib::backend::CommitId;
 use jj_lib::git::{fetch, push_branches, GitBranchPushTargets, GitFetchError, GitPushError, RemoteCallbacks};
 use jj_lib::git_backend::GitBackend;
 use jj_lib::refs::BranchPushUpdate;
@@ -39,7 +38,7 @@ pub fn native_git_push(
 
     // Start transaction
     let mut tx = repo.start_transaction(&user_settings);
-    let git_settings = user_settings.git_settings();
+    let _git_settings = user_settings.git_settings();
 
     // Get git repository via GitBackend
     let store = Repo::store(tx.mut_repo());

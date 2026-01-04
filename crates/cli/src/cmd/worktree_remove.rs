@@ -55,19 +55,11 @@ pub async fn run(name: &str, delete_files: bool, yes: bool) -> Result<()> {
     let state = ws_manager.get_state(name)?
         .ok_or_else(|| anyhow!("Workspace '{}' not found", name))?;
 
-    // 6. Run jj workspace forget
+    // 6. Run jj workspace forget (using native jj-lib API)
     println!("{}", format!("Removing workspace '{}' from JJ tracking...", name).dimmed());
 
-    let output = Command::new("jj")
-        .current_dir(&repo_root)
-        .args(&["workspace", "forget", name])
-        .output()
-        .context("Failed to execute jj workspace forget")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Failed to forget JJ workspace: {}", stderr);
-    }
+    jj::forget_workspace_native(&repo_root, name)
+        .context("Failed to forget JJ workspace")?;
 
     println!("  {} Removed from JJ tracking", "✓".green());
 

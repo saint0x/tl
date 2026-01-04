@@ -99,23 +99,22 @@ pub async fn run(
         &publish_options,
     )?;
 
-    // 8. Create bookmark if specified
+    // 8. Create bookmark if specified (using native jj-lib API)
     if let Some(bookmark_name) = bookmark {
-        let bookmark = format!("snap/{}", bookmark_name);
         let last_commit_id = commit_ids.last().unwrap();
 
-        let output = std::process::Command::new("jj")
-            .current_dir(&repo_root)
-            .args(&["bookmark", "create", &bookmark, "-r", last_commit_id])
-            .output()
+        // Load workspace and create bookmark natively
+        let mut workspace = jj::load_workspace(&repo_root)?;
+        jj::create_bookmark_native(&mut workspace, &bookmark_name, last_commit_id)
             .context("Failed to create JJ bookmark")?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Failed to create bookmark '{}': {}", bookmark, stderr);
-        }
+        let bookmark_display = if bookmark_name.starts_with("snap/") {
+            bookmark_name.clone()
+        } else {
+            format!("snap/{}", bookmark_name)
+        };
 
-        println!("{} Created bookmark: {}", "✓".green(), bookmark.yellow());
+        println!("{} Created bookmark: {}", "✓".green(), bookmark_display.yellow());
     }
 
     // 9. Auto-pin if configured

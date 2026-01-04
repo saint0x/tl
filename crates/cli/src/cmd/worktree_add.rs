@@ -78,19 +78,11 @@ pub async fn run(
         println!("  {} Checkpoint: {}", "✓".green(), short_id.yellow());
     }
 
-    // 7. Create JJ workspace
+    // 7. Create JJ workspace (using native jj-lib API)
     println!("{}", format!("Creating workspace '{}'...", name).dimmed());
 
-    let output = Command::new("jj")
-        .current_dir(&repo_root)
-        .args(&["workspace", "add", "--name", name, workspace_path.to_str().unwrap()])
-        .output()
-        .context("Failed to execute jj workspace add")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Failed to create JJ workspace: {}", stderr);
-    }
+    jj::add_workspace_native(&repo_root, name, &workspace_path)
+        .context("Failed to create JJ workspace")?;
 
     // 8. If --from specified, restore checkpoint to new workspace
     let checkpoint_id = if let Some(from_ref) = from {

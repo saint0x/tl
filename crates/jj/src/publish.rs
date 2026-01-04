@@ -7,15 +7,14 @@
 //!
 //! This is the production-ready approach used by real jj integrations.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use journal::Checkpoint;
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::Path;
 use tl_core::Store;
 
 use crate::mapping::JjMapping;
-use crate::materialize::{format_commit_message, CommitMessageOptions, PublishOptions};
+use crate::materialize::PublishOptions;
 
 /// Materialize a checkpoint tree to a target directory
 ///
