@@ -193,16 +193,18 @@ impl Daemon {
                 }
 
                 // Handle IPC connections
-                Ok(stream) = self.ipc_server.accept() => {
-                    let journal = Arc::clone(&self.journal);
-                    let status = Arc::clone(&self.status);
-                    let shutdown_tx = self.shutdown_tx.clone();
-                    let flush_tx = self.flush_tx.clone();
-                    let checkpoint_count_cache = Arc::clone(&self.checkpoint_count_cache);
+                result = self.ipc_server.accept() => {
+                    match result {
+                        Ok(stream) => {
+                            let journal = Arc::clone(&self.journal);
+                            let status = Arc::clone(&self.status);
+                            let shutdown_tx = self.shutdown_tx.clone();
+                            let flush_tx = self.flush_tx.clone();
+                            let checkpoint_count_cache = Arc::clone(&self.checkpoint_count_cache);
 
-                    tokio::spawn(async move {
-                        let handler = |request: IpcRequest| async move {
-                            match request {
+                            tokio::spawn(async move {
+                                let handler = |request: IpcRequest| async move {
+                                    match request {
                                 IpcRequest::GetStatus => {
                                     let status = status.read().await.clone();
                                     Ok(IpcResponse::Status(status))
@@ -293,6 +295,21 @@ impl Daemon {
 
                                     Ok(IpcResponse::CheckpointBatch(results))
                                 }
+                                IpcRequest::GetStatusFull => {
+                                    // Get all data in one atomic operation
+                                    let status = status.read().await.clone();
+                                    let head = match journal.latest() {
+                                        Ok(checkpoint) => checkpoint,
+                                        Err(e) => return Ok(IpcResponse::Error(e.to_string())),
+                                    };
+                                    let count = checkpoint_count_cache.load(Ordering::Relaxed);
+
+                                    Ok(IpcResponse::StatusFull {
+                                        status,
+                                        head,
+                                        checkpoint_count: count,
+                                    })
+                                }
                                 IpcRequest::Shutdown => {
                                     // Signal shutdown
                                     let _ = shutdown_tx.send(());
@@ -301,10 +318,17 @@ impl Daemon {
                             }
                         };
 
-                        if let Err(e) = handle_connection(stream, handler).await {
-                            tracing::error!("IPC connection error: {}", e);
+                            if let Err(e) = handle_connection(stream, handler).await {
+                                tracing::error!("IPC connection error: {}", e);
+                            }
+                        });
                         }
-                    });
+                        Err(e) => {
+                            tracing::error!("IPC accept error: {}", e);
+                            // Small delay to prevent tight loop if accept keeps failing
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                    }
                 }
 
                 // Shutdown signals

@@ -321,7 +321,10 @@ impl Watcher {
         }
 
         // Poll for events from platform watcher
+        let mut processed_any = false;
         while let Some(event) = watcher.poll_event().await? {
+            processed_any = true;
+
             // Handle overflow events
             if matches!(event.kind, EventKind::Overflow) {
                 // Will be handled on next poll
@@ -345,6 +348,13 @@ impl Watcher {
         let ready_events = self.coalescer.collect_ready();
         for event in ready_events {
             self.debouncer.push(event.path);
+            processed_any = true;
+        }
+
+        // If no events were processed, sleep briefly to prevent tight loop
+        // This ensures poll_events() always awaits at least once
+        if !processed_any {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
 
         Ok(())

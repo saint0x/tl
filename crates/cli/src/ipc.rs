@@ -33,6 +33,8 @@ pub enum IpcRequest {
     GetCheckpointCount,
     /// Get multiple checkpoints in one call (for diff)
     GetCheckpointBatch(Vec<String>),
+    /// Get full status info (status + head + count) in one call
+    GetStatusFull,
 }
 
 /// IPC response from daemon to CLI
@@ -54,6 +56,12 @@ pub enum IpcResponse {
     CheckpointCount(usize),
     /// Batch of checkpoints (same order as request, None if not found)
     CheckpointBatch(Vec<Option<Checkpoint>>),
+    /// Full status information
+    StatusFull {
+        status: DaemonStatus,
+        head: Option<Checkpoint>,
+        checkpoint_count: usize,
+    },
     /// Error occurred
     Error(String),
 }
@@ -207,6 +215,17 @@ impl IpcClient {
             IpcResponse::CheckpointBatch(checkpoints) => Ok(checkpoints),
             IpcResponse::Error(err) => anyhow::bail!("Daemon error: {}", err),
             _ => anyhow::bail!("Unexpected response to GetCheckpointBatch"),
+        }
+    }
+
+    /// Get full status information in one IPC call (for status command)
+    pub async fn get_status_full(&mut self) -> Result<(DaemonStatus, Option<Checkpoint>, usize)> {
+        match self.send_request(&IpcRequest::GetStatusFull).await? {
+            IpcResponse::StatusFull { status, head, checkpoint_count } => {
+                Ok((status, head, checkpoint_count))
+            }
+            IpcResponse::Error(err) => anyhow::bail!("Daemon error: {}", err),
+            _ => anyhow::bail!("Unexpected response to GetStatusFull"),
         }
     }
 }

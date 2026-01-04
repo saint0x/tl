@@ -20,10 +20,9 @@ pub async fn run() -> Result<()> {
     let mut client = resilient_client.connect_with_retry().await
         .context("Failed to connect to daemon")?;
 
-    // 4. Get all data via IPC
-    let status = client.get_status().await?;
-    let latest = client.get_head().await?;
-    let checkpoint_count = client.get_checkpoint_count().await?;
+    // 4. Get all data via single batched IPC call
+    let (status, latest, checkpoint_count) = client.get_status_full().await
+        .context("Failed to retrieve status from daemon")?;
 
     // 5. Get storage stats
     let total_size = util::calculate_dir_size(&tl_dir)?;
