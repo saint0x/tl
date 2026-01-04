@@ -101,6 +101,16 @@ impl Tree {
         self.entries.is_empty()
     }
 
+    /// Get an iterator over all entries
+    pub fn entries(&self) -> impl Iterator<Item = &Entry> {
+        self.entries.values()
+    }
+
+    /// Get an iterator over all entries with their paths (as byte slices)
+    pub fn entries_with_paths(&self) -> impl Iterator<Item = (&[u8], &Entry)> {
+        self.entries.iter().map(|(k, v)| (k.as_slice(), v))
+    }
+
     /// Serialize the tree to bytes (TreeV1 format)
     ///
     /// Format:

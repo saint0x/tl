@@ -22,3 +22,15 @@ bincode = { workspace = true }
 
 # Concurrency
 parking_lot = { workspace = true }
+
+# Data structures
+ahash = { workspace = true }
+smallvec = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "checkpoint_bench"
+harness = false

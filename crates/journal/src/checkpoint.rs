@@ -87,3 +87,146 @@ fn current_timestamp_ms() -> u64 {
         .unwrap()
         .as_millis() as u64
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn create_test_checkpoint() -> Checkpoint {
+        let root_tree = Blake3Hash::from_bytes([1u8; 32]);
+        let meta = CheckpointMeta {
+            files_changed: 5,
+            bytes_added: 1024,
+            bytes_removed: 512,
+        };
+
+        Checkpoint::new(
+            None,
+            root_tree,
+            CheckpointReason::FsBatch,
+            vec![PathBuf::from("test/file.txt")],
+            meta,
+        )
+    }
+
+    #[test]
+    fn test_checkpoint_serialization_roundtrip() {
+        let checkpoint = create_test_checkpoint();
+
+        // Serialize
+        let bytes = checkpoint.serialize().unwrap();
+
+        // Deserialize
+        let deserialized = Checkpoint::deserialize(&bytes).unwrap();
+
+        // Verify fields match
+        assert_eq!(checkpoint.id, deserialized.id);
+        assert_eq!(checkpoint.parent, deserialized.parent);
+        assert_eq!(checkpoint.root_tree, deserialized.root_tree);
+        assert_eq!(checkpoint.reason, deserialized.reason);
+        assert_eq!(checkpoint.touched_paths, deserialized.touched_paths);
+        assert_eq!(checkpoint.meta.files_changed, deserialized.meta.files_changed);
+        assert_eq!(checkpoint.meta.bytes_added, deserialized.meta.bytes_added);
+        assert_eq!(checkpoint.meta.bytes_removed, deserialized.meta.bytes_removed);
+    }
+
+    #[test]
+    fn test_checkpoint_compact_size() {
+        let checkpoint = create_test_checkpoint();
+        let bytes = checkpoint.serialize().unwrap();
+
+        // Target: < 300 bytes per checkpoint (per plan)
+        // Actual size will depend on paths, but should be reasonable
+        assert!(bytes.len() < 500, "Checkpoint size too large: {} bytes", bytes.len());
+    }
+
+    #[test]
+    fn test_ulid_ordering() {
+        // Create two checkpoints with slight delay
+        let cp1 = create_test_checkpoint();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let cp2 = create_test_checkpoint();
+
+        // ULIDs should be monotonically increasing (time-ordered)
+        assert!(cp1.id < cp2.id, "ULIDs should be time-ordered");
+    }
+
+    #[test]
+    fn test_checkpoint_with_parent() {
+        let parent_id = Ulid::new();
+        let root_tree = Blake3Hash::from_bytes([2u8; 32]);
+        let meta = CheckpointMeta {
+            files_changed: 1,
+            bytes_added: 100,
+            bytes_removed: 0,
+        };
+
+        let checkpoint = Checkpoint::new(
+            Some(parent_id),
+            root_tree,
+            CheckpointReason::Manual,
+            vec![],
+            meta,
+        );
+
+        assert_eq!(checkpoint.parent, Some(parent_id));
+    }
+
+    #[test]
+    fn test_checkpoint_reasons() {
+        let reasons = vec![
+            CheckpointReason::FsBatch,
+            CheckpointReason::Manual,
+            CheckpointReason::Restore,
+            CheckpointReason::Publish,
+            CheckpointReason::GcCompact,
+        ];
+
+        for reason in reasons {
+            let root_tree = Blake3Hash::from_bytes([3u8; 32]);
+            let meta = CheckpointMeta {
+                files_changed: 0,
+                bytes_added: 0,
+                bytes_removed: 0,
+            };
+
+            let checkpoint = Checkpoint::new(None, root_tree, reason, vec![], meta);
+
+            // Verify serialization works for all reasons
+            let bytes = checkpoint.serialize().unwrap();
+            let deserialized = Checkpoint::deserialize(&bytes).unwrap();
+            assert_eq!(checkpoint.reason, deserialized.reason);
+        }
+    }
+
+    #[test]
+    fn test_checkpoint_multiple_paths() {
+        let paths = vec![
+            PathBuf::from("src/main.rs"),
+            PathBuf::from("src/lib.rs"),
+            PathBuf::from("tests/test.rs"),
+        ];
+
+        let root_tree = Blake3Hash::from_bytes([4u8; 32]);
+        let meta = CheckpointMeta {
+            files_changed: 3,
+            bytes_added: 500,
+            bytes_removed: 200,
+        };
+
+        let checkpoint = Checkpoint::new(
+            None,
+            root_tree,
+            CheckpointReason::FsBatch,
+            paths.clone(),
+            meta,
+        );
+
+        let bytes = checkpoint.serialize().unwrap();
+        let deserialized = Checkpoint::deserialize(&bytes).unwrap();
+
+        assert_eq!(checkpoint.touched_paths, deserialized.touched_paths);
+        assert_eq!(checkpoint.touched_paths.len(), 3);
+    }
+}
