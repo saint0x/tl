@@ -21,8 +21,10 @@ pub async fn run(limit: Option<usize>) -> Result<()> {
     let mut client = resilient_client.connect_with_retry().await
         .context("Failed to connect to daemon")?;
 
-    // 4. Get checkpoint count via IPC
-    let checkpoint_count = client.get_checkpoint_count().await?;
+    // 4. Get checkpoint count and list in one IPC call
+    let limit_val = limit.unwrap_or(20);
+    let (checkpoint_count, checkpoints) = client.get_log_data(Some(limit_val), None).await?;
+
     if checkpoint_count == 0 {
         println!("{}", "No checkpoints yet".dimmed());
         println!();
@@ -30,14 +32,10 @@ pub async fn run(limit: Option<usize>) -> Result<()> {
         return Ok(());
     }
 
-    // 5. Get checkpoints via IPC (batched, single call)
-    let limit_val = limit.unwrap_or(20);
-    let checkpoints = client.get_checkpoints(Some(limit_val), None).await?;
-
-    // 6. Open store for tree diffs (read-only, safe)
+    // 5. Open store for tree diffs (read-only, safe)
     let store = Store::open(&repo_root)?;
 
-    // 7. Display each checkpoint with diff summary
+    // 6. Display each checkpoint with diff summary
     println!("{}", "Checkpoint History".bold());
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!();

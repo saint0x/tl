@@ -35,6 +35,11 @@ pub enum IpcRequest {
     GetCheckpointBatch(Vec<String>),
     /// Get full status info (status + head + count) in one call
     GetStatusFull,
+    /// Get checkpoint count and list in one call (for log)
+    GetLogData {
+        limit: Option<usize>,
+        offset: Option<usize>,
+    },
 }
 
 /// IPC response from daemon to CLI
@@ -61,6 +66,11 @@ pub enum IpcResponse {
         status: DaemonStatus,
         head: Option<Checkpoint>,
         checkpoint_count: usize,
+    },
+    /// Log data (count + checkpoints)
+    LogData {
+        count: usize,
+        checkpoints: Vec<Checkpoint>,
     },
     /// Error occurred
     Error(String),
@@ -226,6 +236,16 @@ impl IpcClient {
             }
             IpcResponse::Error(err) => anyhow::bail!("Daemon error: {}", err),
             _ => anyhow::bail!("Unexpected response to GetStatusFull"),
+        }
+    }
+
+    /// Get checkpoint count and list in one IPC call (for log command)
+    pub async fn get_log_data(&mut self, limit: Option<usize>, offset: Option<usize>) -> Result<(usize, Vec<Checkpoint>)> {
+        let request = IpcRequest::GetLogData { limit, offset };
+        match self.send_request(&request).await? {
+            IpcResponse::LogData { count, checkpoints } => Ok((count, checkpoints)),
+            IpcResponse::Error(err) => anyhow::bail!("Daemon error: {}", err),
+            _ => anyhow::bail!("Unexpected response to GetLogData"),
         }
     }
 }

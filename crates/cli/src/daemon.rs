@@ -310,6 +310,43 @@ impl Daemon {
                                         checkpoint_count: count,
                                     })
                                 }
+                                IpcRequest::GetLogData { limit, offset } => {
+                                    // Get count and checkpoints in one call
+                                    let count = checkpoint_count_cache.load(Ordering::Relaxed);
+
+                                    // Get checkpoints (same logic as GetCheckpoints)
+                                    let mut checkpoints = Vec::new();
+                                    let limit = limit.unwrap_or(20);
+                                    let offset = offset.unwrap_or(0);
+
+                                    // Walk journal from HEAD backwards
+                                    let mut current_id = match journal.latest() {
+                                        Ok(Some(cp)) => Some(cp.id),
+                                        Ok(None) => None,
+                                        Err(e) => return Ok(IpcResponse::Error(e.to_string())),
+                                    };
+
+                                    let mut idx = 0;
+                                    while let Some(id) = current_id {
+                                        if idx >= offset + limit {
+                                            break;
+                                        }
+
+                                        match journal.get(&id) {
+                                            Ok(Some(checkpoint)) => {
+                                                if idx >= offset {
+                                                    checkpoints.push(checkpoint.clone());
+                                                }
+                                                current_id = checkpoint.parent;
+                                                idx += 1;
+                                            }
+                                            Ok(None) => break,
+                                            Err(e) => return Ok(IpcResponse::Error(e.to_string())),
+                                        }
+                                    }
+
+                                    Ok(IpcResponse::LogData { count, checkpoints })
+                                }
                                 IpcRequest::Shutdown => {
                                     // Signal shutdown
                                     let _ = shutdown_tx.send(());
