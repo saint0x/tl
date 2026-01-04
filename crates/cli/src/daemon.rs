@@ -366,7 +366,7 @@ fn load_or_create_pathmap(tl_dir: &Path, journal: &Journal) -> Result<PathMap> {
                 let root_hash = journal
                     .latest()?
                     .map(|cp| cp.root_tree)
-                    .unwrap_or_else(|| tl_core::hash::Blake3Hash::from_bytes([0u8; 32]));
+                    .unwrap_or_else(|| tl_core::hash::Sha1Hash::from_bytes([0u8; 20]));
                 Ok(PathMap::new(root_hash))
             }
         }
@@ -377,7 +377,7 @@ fn load_or_create_pathmap(tl_dir: &Path, journal: &Journal) -> Result<PathMap> {
         let root_hash = journal
             .latest()?
             .map(|cp| cp.root_tree)
-            .unwrap_or_else(|| tl_core::hash::Blake3Hash::from_bytes([0u8; 32]));
+            .unwrap_or_else(|| tl_core::hash::Sha1Hash::from_bytes([0u8; 20]));
         Ok(PathMap::new(root_hash))
     }
 }

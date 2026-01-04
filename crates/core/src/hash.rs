@@ -81,43 +81,29 @@ pub fn hash_bytes(data: &[u8]) -> Sha1Hash {
     Sha1Hash::from_bytes(bytes)
 }
 
-/// Hash a file using SHA-1 (streaming for large files)
+/// Hash a file using SHA-1 with Git blob format
+///
+/// This computes the hash as Git would: hash of "blob <size>\0<content>"
 pub fn hash_file(path: &Path) -> Result<Sha1Hash> {
-    use std::fs::File;
-    use std::io::{BufReader, Read};
+    use std::fs;
 
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let mut hasher = Sha1::new();
+    // Read file contents
+    let data = fs::read(path)?;
 
-    let mut buffer = [0u8; 8192]; // 8KB buffer
-    loop {
-        let bytes_read = reader.read(&mut buffer)?;
-        if bytes_read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..bytes_read]);
-    }
-
-    let result = hasher.finalize();
-    let mut bytes = [0u8; 20];
-    bytes.copy_from_slice(&result);
-    Ok(Sha1Hash::from_bytes(bytes))
+    // Hash using Git blob format
+    Ok(git::hash_blob(&data))
 }
 
-/// Hash a file using memory-mapped I/O (optimized for large files > 4MB)
+/// Hash a file using memory-mapped I/O with Git blob format (optimized for large files > 4MB)
 pub fn hash_file_mmap(path: &Path) -> Result<Sha1Hash> {
     use std::fs::File;
     use memmap2::Mmap;
 
     let file = File::open(path)?;
     let mmap = unsafe { Mmap::map(&file)? };
-    let mut hasher = Sha1::new();
-    hasher.update(&mmap);
-    let result = hasher.finalize();
-    let mut bytes = [0u8; 20];
-    bytes.copy_from_slice(&result);
-    Ok(Sha1Hash::from_bytes(bytes))
+
+    // Hash using Git blob format
+    Ok(git::hash_blob(&mmap))
 }
 
 /// Hash file with stability verification (double-stat pattern)
@@ -135,11 +121,14 @@ pub fn hash_file_mmap(path: &Path) -> Result<Sha1Hash> {
 ///
 /// # Example
 /// ```no_run
-/// use core::hash::hash_file_stable;
+/// # extern crate core as tl_core;
 /// use std::path::Path;
+/// use tl_core::hash::hash_file_stable;
 ///
+/// # fn main() -> anyhow::Result<()> {
 /// let hash = hash_file_stable(Path::new("file.txt"), 3)?;
-/// # Ok::<(), anyhow::Error>(())
+/// # Ok(())
+/// # }
 /// ```
 pub fn hash_file_stable(path: &Path, max_retries: u8) -> Result<Sha1Hash> {
     use std::fs;
@@ -240,7 +229,8 @@ pub mod git {
 
         for (name, mode, hash) in sorted_entries {
             // Format: <mode> <name>\0<20-byte-hash>
-            content.extend_from_slice(format!("{} {}\0", mode, name).as_bytes());
+            // Mode must be in octal format (Git standard)
+            content.extend_from_slice(format!("{:o} {}\0", mode, name).as_bytes());
             content.extend_from_slice(hash.as_bytes());
         }
 
@@ -326,9 +316,9 @@ mod tests {
         std::fs::write(&file_path, data)?;
 
         let hash_from_file = hash_file(&file_path)?;
-        let hash_from_bytes = hash_bytes(data);
+        let hash_from_git_blob = git::hash_blob(data);
 
-        assert_eq!(hash_from_file, hash_from_bytes);
+        assert_eq!(hash_from_file, hash_from_git_blob, "hash_file should use Git blob format");
         Ok(())
     }
 
@@ -341,9 +331,9 @@ mod tests {
         std::fs::write(&file_path, data)?;
 
         let hash_mmap = hash_file_mmap(&file_path)?;
-        let hash_bytes = hash_bytes(data);
+        let hash_git_blob = git::hash_blob(data);
 
-        assert_eq!(hash_mmap, hash_bytes);
+        assert_eq!(hash_mmap, hash_git_blob, "hash_file_mmap should use Git blob format");
         Ok(())
     }
 
@@ -392,9 +382,9 @@ mod tests {
         let file = temp_dir.path().join("stable.txt");
         std::fs::write(&file, b"stable content")?;
 
-        // Stable file should hash successfully
+        // Stable file should hash successfully using Git blob format
         let hash = hash_file_stable(&file, 3)?;
-        assert_eq!(hash, hash_bytes(b"stable content"));
+        assert_eq!(hash, git::hash_blob(b"stable content"));
         Ok(())
     }
 
@@ -483,10 +473,10 @@ mod tests {
 
         let hash_stable = hash_file_stable(&file, 3)?;
         let hash_regular = hash_file(&file)?;
-        let hash_bytes = hash_bytes(data);
+        let hash_git_blob = git::hash_blob(data);
 
-        assert_eq!(hash_stable, hash_regular);
-        assert_eq!(hash_stable, hash_bytes);
+        assert_eq!(hash_stable, hash_regular, "stable and regular hash_file should match");
+        assert_eq!(hash_stable, hash_git_blob, "hash_file should use Git blob format");
         Ok(())
     }
 

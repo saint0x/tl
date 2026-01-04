@@ -188,8 +188,8 @@ fn reconcile_symlink(
     let target = std::fs::read_link(abs_path)?;
     let target_bytes = target.to_string_lossy();
 
-    // Hash the target path (not the content it points to)
-    let blob_hash = hash::hash_bytes(target_bytes.as_bytes());
+    // Hash the target path using Git blob format
+    let blob_hash = hash::git::hash_blob(target_bytes.as_bytes());
 
     // Check if symlink target has changed
     if let Some(existing_entry) = map.get(path) {

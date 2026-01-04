@@ -232,7 +232,7 @@ fn export_jj_commit_to_dir(repo_root: &Path, target_dir: &Path) -> Result<()> {
 }
 
 /// Import a directory into the store, returning root tree hash and file count
-fn import_directory_to_store(dir: &Path, store: &Store) -> Result<(tl_core::Blake3Hash, u32)> {
+fn import_directory_to_store(dir: &Path, store: &Store) -> Result<(tl_core::Sha1Hash, u32)> {
     use std::fs;
     use tl_core::{Entry, Tree};
     use walkdir::WalkDir;

@@ -1,6 +1,6 @@
 //! Integration tests for timelapse core functionality
 
-use core::hash::hash_bytes;
+use core::hash::git::hash_blob;
 use core::store::Store;
 use core::tree::{Entry, Tree};
 use std::path::Path;
@@ -18,9 +18,9 @@ fn test_full_storage_pipeline() -> anyhow::Result<()> {
     let blob2_data = b"This is the content of file2.txt";
     let blob3_data = b"This is the content of file3.txt with more data to potentially trigger compression";
 
-    let hash1 = hash_bytes(blob1_data);
-    let hash2 = hash_bytes(blob2_data);
-    let hash3 = hash_bytes(blob3_data);
+    let hash1 = hash_blob(blob1_data);
+    let hash2 = hash_blob(blob2_data);
+    let hash3 = hash_blob(blob3_data);
 
     store.blob_store().write_blob(hash1, blob1_data)?;
     store.blob_store().write_blob(hash2, blob2_data)?;
@@ -66,7 +66,7 @@ fn test_store_persistence() -> anyhow::Result<()> {
         let store = Store::init(repo_root)?;
 
         let data = b"persistent data";
-        let hash = hash_bytes(data);
+        let hash = hash_blob(data);
 
         store.blob_store().write_blob(hash, data)?;
 
@@ -81,7 +81,7 @@ fn test_store_persistence() -> anyhow::Result<()> {
         let store = Store::open(repo_root)?;
 
         let data = b"persistent data";
-        let hash = hash_bytes(data);
+        let hash = hash_blob(data);
 
         // Blob should still be readable
         let blob = store.blob_store().read_blob(hash)?;
@@ -102,7 +102,7 @@ fn test_large_tree() -> anyhow::Result<()> {
     let mut tree = Tree::new();
     for i in 0..100 {
         let data = format!("content of file {}", i);
-        let hash = hash_bytes(data.as_bytes());
+        let hash = hash_blob(data.as_bytes());
 
         store.blob_store().write_blob(hash, data.as_bytes())?;
 
@@ -135,9 +135,9 @@ fn test_tree_diff_integration() -> anyhow::Result<()> {
     let store = Store::init(repo_root)?;
 
     // Create initial tree
-    let hash1 = hash_bytes(b"content1");
-    let hash2 = hash_bytes(b"content2");
-    let hash3 = hash_bytes(b"modified");
+    let hash1 = hash_blob(b"content1");
+    let hash2 = hash_blob(b"content2");
+    let hash3 = hash_blob(b"modified");
 
     store.blob_store().write_blob(hash1, b"content1")?;
     store.blob_store().write_blob(hash2, b"content2")?;
@@ -190,7 +190,7 @@ fn test_concurrent_operations() -> anyhow::Result<()> {
         let store_clone = Arc::clone(&store);
         let handle = thread::spawn(move || -> anyhow::Result<()> {
             let data = format!("thread {} data", i);
-            let hash = hash_bytes(data.as_bytes());
+            let hash = hash_blob(data.as_bytes());
             store_clone.blob_store().write_blob(hash, data.as_bytes())?;
             Ok(())
         });
@@ -205,7 +205,7 @@ fn test_concurrent_operations() -> anyhow::Result<()> {
     // Verify all blobs were written
     for i in 0..10 {
         let data = format!("thread {} data", i);
-        let hash = hash_bytes(data.as_bytes());
+        let hash = hash_blob(data.as_bytes());
         let blob = store.blob_store().read_blob(hash)?;
         assert_eq!(blob.as_slice(), data.as_bytes());
     }

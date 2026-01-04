@@ -13,7 +13,7 @@ pub mod store;
 
 // Re-export main types for convenience
 pub use hash::{Sha1Hash, IncrementalHasher};
-pub use blob::{Blob, BlobStore, BlobHeaderV1};
+pub use blob::{Blob, BlobStore};
 pub use tree::{Tree, Entry, EntryKind, TreeDiff};
 pub use store::Store;
 

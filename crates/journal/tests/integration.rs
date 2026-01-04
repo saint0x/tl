@@ -1,7 +1,7 @@
 //! Integration tests for journal crate
 
 use journal::{Checkpoint, CheckpointMeta, CheckpointReason, Journal, PathMap};
-use core::{Blake3Hash, Entry, Store, Tree, hash::hash_bytes};
+use core::{Sha1Hash, Entry, Store, Tree, hash::hash_bytes};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -75,7 +75,7 @@ fn test_checkpoint_chain() -> anyhow::Result<()> {
 
     // Create chain of 10 checkpoints
     let mut parent_id = None;
-    let mut last_tree_hash = Blake3Hash::from_bytes([0u8; 32]);
+    let mut last_tree_hash = Sha1Hash::from_bytes([0u8; 20]);
 
     for i in 0..10 {
         let mut tree = Tree::new();

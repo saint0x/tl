@@ -103,7 +103,7 @@ fn test_permission_only_change_detection() -> Result<()> {
 
     // Verify permission change was detected
     let entry2 = map2.get(Path::new("test_file.txt")).expect("File should be in map");
-    assert_eq!(entry2.kind, EntryKind::File);
+    assert_eq!(entry2.kind, EntryKind::ExecutableFile, "File should now be executable");
     assert_eq!(entry2.mode & 0o777, 0o755, "Mode should be updated to 755");
     assert_eq!(entry1.blob_hash, entry2.blob_hash, "Content hash should be unchanged");
     assert_ne!(hash1, hash2, "Tree hash should change when permissions change");
@@ -202,11 +202,12 @@ fn test_readonly_to_writable_permission_change() -> Result<()> {
     let (map1, _tree1, _hash1) = incremental_update(&base_map, dirty_paths, repo_root, &store)?;
 
     let entry1 = map1.get(Path::new("readonly.txt")).unwrap();
-    assert_eq!(entry1.mode & 0o777, 0o444);
+    // Git format normalizes 0o444 to 0o644 (regular file)
+    assert_eq!(entry1.mode & 0o777, 0o644, "Git normalizes readonly to regular file");
 
-    // Make writable
+    // Make executable (to test actual Git mode change)
     let mut perms = fs::metadata(&file_path)?.permissions();
-    perms.set_mode(0o644);
+    perms.set_mode(0o755);
     fs::set_permissions(&file_path, perms)?;
 
     // Create second checkpoint
@@ -214,7 +215,8 @@ fn test_readonly_to_writable_permission_change() -> Result<()> {
     let (map2, _tree2, _hash2) = incremental_update(&map1, dirty_paths, repo_root, &store)?;
 
     let entry2 = map2.get(Path::new("readonly.txt")).unwrap();
-    assert_eq!(entry2.mode & 0o777, 0o644);
+    assert_eq!(entry2.kind, EntryKind::ExecutableFile);
+    assert_eq!(entry2.mode & 0o777, 0o755, "Should now be executable");
     assert_eq!(entry1.blob_hash, entry2.blob_hash, "Content unchanged");
 
     Ok(())
@@ -262,20 +264,27 @@ fn test_multiple_permission_changes_sequence() -> Result<()> {
     let file_path = repo_root.join("changing.txt");
     fs::write(&file_path, b"content")?;
 
-    // Test sequence: 644 -> 755 -> 700 -> 644
-    let modes = vec![0o644, 0o755, 0o700, 0o644];
+    // Test sequence: Git only supports 644 (regular) and 755 (executable)
+    // Test: 644 -> 755 -> 644 -> 755
+    let test_cases = vec![
+        (0o644, 0o644, EntryKind::File),           // Regular file
+        (0o755, 0o755, EntryKind::ExecutableFile), // Executable
+        (0o644, 0o644, EntryKind::File),           // Back to regular
+        (0o777, 0o755, EntryKind::ExecutableFile), // 0o777 normalized to 0o755
+    ];
     let mut prev_map = PathMap::new(hash_bytes(b"initial"));
 
-    for mode in modes {
+    for (set_mode, expected_git_mode, expected_kind) in test_cases {
         let mut perms = fs::metadata(&file_path)?.permissions();
-        perms.set_mode(mode);
+        perms.set_mode(set_mode);
         fs::set_permissions(&file_path, perms)?;
 
         let dirty_paths = vec![Path::new("changing.txt")];
         let (new_map, _tree, _hash) = incremental_update(&prev_map, dirty_paths, repo_root, &store)?;
 
         let entry = new_map.get(Path::new("changing.txt")).unwrap();
-        assert_eq!(entry.mode & 0o777, mode, "Mode should match {:#o}", mode);
+        assert_eq!(entry.kind, expected_kind, "Kind should match for mode {:#o}", set_mode);
+        assert_eq!(entry.mode & 0o777, expected_git_mode, "Git mode should be {:#o} (set {:#o})", expected_git_mode, set_mode);
 
         prev_map = new_map;
     }
