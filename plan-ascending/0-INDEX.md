@@ -1,8 +1,8 @@
-# Seer Implementation Roadmap - Index
+# Timelapse Implementation Roadmap - Index
 
 ## Overview
 
-This directory contains the complete, detailed implementation checklist for **Seer**, a low-latency repository checkpoint system built in Rust.
+This directory contains the complete, detailed implementation checklist for **Timelapse**, a low-latency repository checkpoint system built in Rust.
 
 **Key Objectives:**
 - Content-addressed storage (tree + blob model)
@@ -15,24 +15,25 @@ This directory contains the complete, detailed implementation checklist for **Se
 
 Each numbered file contains a complete checklist for one major phase of development. Phases build on each other sequentially.
 
-### [1.md](./1.md) - Foundation & Core Storage
+### [1.md](./1.md) - Foundation & Core Storage ✅ COMPLETE
 **Dependencies:** None (starting point)
 **Estimated Scope:** ~40% of total work
+**Status:** 72 tests passing (67 unit + 5 integration)
 
 **Key Deliverables:**
 - Cargo workspace structure
 - BLAKE3 hashing with SIMD
 - Blob storage with memory pooling
 - Tree representation with incremental updates
-- On-disk store layout (`.snap/` directory)
+- On-disk store layout (`.tl/` directory)
 - Atomic write operations
 
 **Critical Files Created:**
 - `Cargo.toml` (workspace root)
-- `crates/seer-core/src/hash.rs`
-- `crates/seer-core/src/blob.rs`
-- `crates/seer-core/src/tree.rs`
-- `crates/seer-core/src/store.rs`
+- `crates/core/src/hash.rs`
+- `crates/core/src/blob.rs`
+- `crates/core/src/tree.rs`
+- `crates/core/src/store.rs`
 
 **Performance Targets:**
 - Blob operations: < 5ms for typical files
@@ -42,7 +43,7 @@ Each numbered file contains a complete checklist for one major phase of developm
 ---
 
 ### [2.md](./2.md) - File System Watcher
-**Dependencies:** Phase 1 (seer-core)
+**Dependencies:** Phase 1 (core)
 **Estimated Scope:** ~25% of total work
 
 **Key Deliverables:**
@@ -53,11 +54,11 @@ Each numbered file contains a complete checklist for one major phase of developm
 - Path interning (memory optimization)
 
 **Critical Files Created:**
-- `crates/seer-watcher/src/platform/mod.rs`
-- `crates/seer-watcher/src/platform/macos.rs`
-- `crates/seer-watcher/src/platform/linux.rs`
-- `crates/seer-watcher/src/debounce.rs`
-- `crates/seer-watcher/src/coalesce.rs`
+- `crates/watcher/src/platform/mod.rs`
+- `crates/watcher/src/platform/macos.rs`
+- `crates/watcher/src/platform/linux.rs`
+- `crates/watcher/src/debounce.rs`
+- `crates/watcher/src/coalesce.rs`
 
 **Performance Targets:**
 - Event processing: > 10k events/sec
@@ -67,7 +68,7 @@ Each numbered file contains a complete checklist for one major phase of developm
 ---
 
 ### [3.md](./3.md) - Checkpoint Journal & Incremental Updates
-**Dependencies:** Phase 1 (seer-core)
+**Dependencies:** Phase 1 (core)
 **Estimated Scope:** ~20% of total work
 
 **Key Deliverables:**
@@ -78,11 +79,11 @@ Each numbered file contains a complete checklist for one major phase of developm
 - Retention policies & GC (mark & sweep)
 
 **Critical Files Created:**
-- `crates/seer-journal/src/checkpoint.rs`
-- `crates/seer-journal/src/journal.rs`
-- `crates/seer-journal/src/pathmap.rs`
-- `crates/seer-journal/src/incremental.rs`
-- `crates/seer-journal/src/retention.rs`
+- `crates/journal/src/checkpoint.rs`
+- `crates/journal/src/journal.rs`
+- `crates/journal/src/pathmap.rs`
+- `crates/journal/src/incremental.rs`
+- `crates/journal/src/retention.rs`
 
 **Performance Targets:**
 - Checkpoint creation: < 10ms for small changes (1-5 files)
@@ -96,18 +97,18 @@ Each numbered file contains a complete checklist for one major phase of developm
 **Estimated Scope:** ~10% of total work
 
 **Key Deliverables:**
-- Complete CLI (`snap init`, `status`, `log`, `diff`, `restore`, `pin`, `gc`)
+- Complete CLI (`tlinit`, `status`, `log`, `diff`, `restore`, `pin`, `gc`)
 - Background daemon with IPC
 - Daemon lifecycle management (start/stop)
 - Lock file handling (prevent concurrent daemons)
 - Structured logging & metrics
 
 **Critical Files Created:**
-- `crates/seer-cli/src/main.rs`
-- `crates/seer-cli/src/daemon.rs`
-- `crates/seer-cli/src/ipc.rs`
-- `crates/seer-cli/src/cmd/init.rs`
-- `crates/seer-cli/src/cmd/restore.rs`
+- `crates/cli/src/main.rs`
+- `crates/cli/src/daemon.rs`
+- `crates/cli/src/ipc.rs`
+- `crates/cli/src/cmd/init.rs`
+- `crates/cli/src/cmd/restore.rs`
 
 **Performance Targets:**
 - CLI startup: < 50ms
@@ -121,16 +122,16 @@ Each numbered file contains a complete checklist for one major phase of developm
 
 **Key Deliverables:**
 - Checkpoint → JJ commit materialization
-- `snap publish` (create JJ commit from checkpoint)
-- `snap push` / `snap pull` (Git interop via JJ)
+- `tlpublish` (create JJ commit from checkpoint)
+- `tlpush` / `tlpull` (Git interop via JJ)
 - Checkpoint ↔ JJ commit mapping
 
 **Critical Files Created:**
-- `crates/seer-jj/src/lib.rs`
-- `crates/seer-jj/src/materialize.rs`
-- `crates/seer-jj/src/mapping.rs`
-- `crates/seer-cli/src/cmd/publish.rs`
-- `crates/seer-cli/src/cmd/push.rs`
+- `crates/jj/src/lib.rs`
+- `crates/jj/src/materialize.rs`
+- `crates/jj/src/mapping.rs`
+- `crates/cli/src/cmd/publish.rs`
+- `crates/cli/src/cmd/push.rs`
 
 **Performance Targets:**
 - Publish (materialize): < 100ms for typical checkpoint
@@ -183,7 +184,7 @@ Create benchmarks alongside each phase:
 ## On-Disk Layout (Final)
 
 ```
-.snap/
+.tl/
 ├── config.toml              # User configuration
 ├── HEAD                     # Current checkpoint ID
 ├── locks/
@@ -284,7 +285,7 @@ anyhow = "1.0"
 - [ ] Survives daemon crash (no data loss)
 - [ ] Handles deletes, renames, symlinks, exec bit
 - [ ] GC safely removes unreferenced objects
-- [ ] Never watches `.snap/` or `.git/` (no recursion)
+- [ ] Never watches `.tl/` or `.git/` (no recursion)
 
 **Quality:**
 - [ ] Comprehensive test coverage (unit + integration)

@@ -11,12 +11,22 @@ repository.workspace = true
 notify = { workspace = true }
 
 # Core dependency
-core = { path = "../core" }
+timelapse-core = { path = "../core", package = "core" }
+
+# Async runtime
+tokio = { workspace = true }
+async-trait = { workspace = true }
 
 # Utilities
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+walkdir = { workspace = true }
 
 # Concurrency
 crossbeam-channel = { workspace = true }
 parking_lot = { workspace = true }
+dashmap = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }

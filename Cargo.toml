@@ -48,12 +48,15 @@ ulid = "1.1"
 uuid = { version = "1.6", features = ["v4"] }
 thiserror = "1.0"
 anyhow = "1.0"
+async-trait = "0.1"
+walkdir = "2.4"
 
 # Compression
 zstd = "0.13"
 
 # Testing and benchmarking
 criterion = "0.5"
+tempfile = "3.10"
 
 [workspace.package]
 version = "0.1.0"
