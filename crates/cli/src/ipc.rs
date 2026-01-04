@@ -19,6 +19,8 @@ pub enum IpcRequest {
     GetHead,
     /// Get specific checkpoint by ID
     GetCheckpoint(String),
+    /// Flush pending changes and create checkpoint immediately
+    FlushCheckpoint,
     /// Request graceful shutdown
     Shutdown,
 }
@@ -32,6 +34,8 @@ pub enum IpcResponse {
     Head(Option<Checkpoint>),
     /// Specific checkpoint (if exists)
     Checkpoint(Option<Checkpoint>),
+    /// Checkpoint ID created from flush (None if nothing to checkpoint)
+    CheckpointFlushed(Option<String>),
     /// Simple acknowledgment
     Ok,
     /// Error occurred
@@ -149,6 +153,16 @@ impl IpcClient {
             IpcResponse::Head(checkpoint) => Ok(checkpoint),
             IpcResponse::Error(err) => anyhow::bail!("Daemon error: {}", err),
             _ => anyhow::bail!("Unexpected response to GetHead"),
+        }
+    }
+
+    /// Flush pending changes and create checkpoint immediately
+    /// Returns the checkpoint ID if created, None if nothing to checkpoint
+    pub async fn flush_checkpoint(&mut self) -> Result<Option<String>> {
+        match self.send_request(&IpcRequest::FlushCheckpoint).await? {
+            IpcResponse::CheckpointFlushed(checkpoint_id) => Ok(checkpoint_id),
+            IpcResponse::Error(err) => anyhow::bail!("Daemon error: {}", err),
+            _ => anyhow::bail!("Unexpected response to FlushCheckpoint"),
         }
     }
 }

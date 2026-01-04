@@ -113,6 +113,8 @@ enum Commands {
     },
     /// Stop the daemon
     Stop,
+    /// Force checkpoint creation immediately
+    Flush,
     /// Manage JJ workspaces with timelapse integration
     #[command(subcommand)]
     Worktree(WorktreeCommands),
@@ -192,6 +194,7 @@ async fn main() -> Result<()> {
         }
         Commands::Start { foreground } => cmd::start::run(foreground).await,
         Commands::Stop => cmd::stop::run().await,
+        Commands::Flush => cmd::flush::execute().await,
         Commands::Worktree(worktree_cmd) => match worktree_cmd {
             WorktreeCommands::List => cmd::worktree_list::run().await,
             WorktreeCommands::Add { name, path, from, no_checkpoint } => {

@@ -11,9 +11,12 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::signal::unix::{signal, SignalKind};
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, mpsc, oneshot, RwLock};
 use ulid::Ulid;
 use watcher::Watcher;
+
+/// Flush checkpoint request with response channel
+type FlushRequest = oneshot::Sender<Result<Option<String>>>;
 
 /// Daemon structure
 pub struct Daemon {
@@ -27,6 +30,9 @@ pub struct Daemon {
 
     shutdown_tx: broadcast::Sender<()>,
     shutdown_rx: broadcast::Receiver<()>,
+
+    flush_tx: mpsc::Sender<FlushRequest>,
+    flush_rx: mpsc::Receiver<FlushRequest>,
 
     status: Arc<RwLock<DaemonStatus>>,
 }
@@ -83,6 +89,39 @@ impl Daemon {
                     }
                 }
 
+                // Handle flush checkpoint requests from IPC
+                Some(response_tx) = self.flush_rx.recv() => {
+                    tracing::info!("Received flush checkpoint request");
+
+                    let result = if !pending_paths.is_empty() {
+                        match self.create_checkpoint(&pending_paths).await {
+                            Ok(checkpoint_id) => {
+                                tracing::info!("Flushed checkpoint: {}", checkpoint_id);
+
+                                // Update status
+                                let mut status = self.status.write().await;
+                                status.checkpoints_created += 1;
+                                status.last_checkpoint_time = Some(current_timestamp_ms());
+
+                                pending_paths.clear();
+                                last_checkpoint = Instant::now();
+
+                                Ok(Some(checkpoint_id.to_string()))
+                            }
+                            Err(e) => {
+                                tracing::error!("Flush checkpoint failed: {}", e);
+                                Err(e)
+                            }
+                        }
+                    } else {
+                        // Nothing to checkpoint
+                        Ok(None)
+                    };
+
+                    // Send result back to IPC handler (ignore if receiver dropped)
+                    let _ = response_tx.send(result);
+                }
+
                 // Update uptime periodically
                 _ = tokio::time::sleep(Duration::from_secs(1)) => {
                     self.status.write().await.uptime_secs = start_time.elapsed().as_secs();
@@ -93,6 +132,7 @@ impl Daemon {
                     let journal = Arc::clone(&self.journal);
                     let status = Arc::clone(&self.status);
                     let shutdown_tx = self.shutdown_tx.clone();
+                    let flush_tx = self.flush_tx.clone();
 
                     tokio::spawn(async move {
                         let handler = |request: IpcRequest| async move {
@@ -116,6 +156,21 @@ impl Daemon {
                                             }
                                         }
                                         Err(e) => Ok(IpcResponse::Error(e.to_string())),
+                                    }
+                                }
+                                IpcRequest::FlushCheckpoint => {
+                                    // Request flush from main event loop
+                                    let (response_tx, response_rx) = oneshot::channel();
+
+                                    if let Err(_) = flush_tx.send(response_tx).await {
+                                        return Ok(IpcResponse::Error("Daemon shutting down".to_string()));
+                                    }
+
+                                    // Wait for flush to complete
+                                    match response_rx.await {
+                                        Ok(Ok(checkpoint_id)) => Ok(IpcResponse::CheckpointFlushed(checkpoint_id)),
+                                        Ok(Err(e)) => Ok(IpcResponse::Error(e.to_string())),
+                                        Err(_) => Ok(IpcResponse::Error("Flush request cancelled".to_string())),
                                     }
                                 }
                                 IpcRequest::Shutdown => {
@@ -225,6 +280,70 @@ impl Daemon {
     }
 }
 
+/// Start daemon in background, returns immediately after spawning
+/// Logs are redirected to .tl/logs/daemon.log
+pub(crate) async fn start_background_internal(repo_root: &Path) -> Result<()> {
+    use std::process::Command;
+
+    let log_file = repo_root.join(".tl/logs/daemon.log");
+
+    // Ensure logs directory exists
+    std::fs::create_dir_all(repo_root.join(".tl/logs"))
+        .context("Failed to create logs directory")?;
+
+    // Get current executable path
+    let exe = std::env::current_exe()
+        .context("Failed to get current executable path")?;
+
+    // Spawn daemon in background with nohup
+    let log_file_writer = std::fs::File::create(&log_file)
+        .context("Failed to create log file")?;
+
+    Command::new("nohup")
+        .arg(&exe)
+        .arg("start")
+        .arg("--foreground")
+        .stdout(log_file_writer.try_clone()?)
+        .stderr(log_file_writer)
+        .spawn()
+        .context("Failed to spawn daemon process")?;
+
+    Ok(())
+}
+
+/// Ensure daemon is running, auto-start if needed
+pub async fn ensure_daemon_running() -> Result<()> {
+    // Check if daemon is already running
+    if is_running().await {
+        return Ok(());
+    }
+
+    // Find repo root
+    let repo_root = util::find_repo_root()?;
+
+    // Start daemon in background
+    start_background_internal(&repo_root).await?;
+
+    // Wait with timeout for startup confirmation
+    let timeout = Duration::from_secs(1);
+    let start = Instant::now();
+
+    while start.elapsed() < timeout {
+        if is_running().await {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Timeout - daemon didn't start
+    let log_file = repo_root.join(".tl/logs/daemon.log");
+    anyhow::bail!(
+        "Daemon failed to start within {}s (check logs at {})",
+        timeout.as_secs(),
+        log_file.display()
+    )
+}
+
 /// Start the Timelapse daemon
 pub async fn start() -> Result<()> {
     // 1. Find repository root
@@ -256,8 +375,9 @@ pub async fn start() -> Result<()> {
         .context("Failed to create watcher")?;
     watcher.start().await.context("Failed to start watcher")?;
 
-    // 6. Create daemon status
+    // 6. Create daemon status and channels
     let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+    let (flush_tx, flush_rx) = mpsc::channel(10);  // Buffer up to 10 flush requests
 
     let status = Arc::new(RwLock::new(DaemonStatus {
         running: true,
@@ -284,6 +404,8 @@ pub async fn start() -> Result<()> {
         ipc_server,
         shutdown_tx,
         shutdown_rx,
+        flush_tx,
+        flush_rx,
         status,
     };
 

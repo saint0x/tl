@@ -38,6 +38,24 @@ pub async fn run(skip_git: bool, skip_jj: bool) -> Result<()> {
     // Phase 4: Timelapse Initialization
     Store::init(&current_dir)?;
 
+    // Ensure logs directory exists for daemon
+    std::fs::create_dir_all(current_dir.join(".tl/logs"))
+        .context("Failed to create logs directory")?;
+
+    // Phase 4.5: Auto-start daemon
+    println!();
+    println!("{} Starting daemon...", "→".cyan());
+    match crate::daemon::ensure_daemon_running().await {
+        Ok(()) => {
+            println!("  {} Daemon started", "✓".green());
+        }
+        Err(e) => {
+            println!("  {} Warning: Could not auto-start daemon: {}", "!".yellow(), e);
+            println!("  {} Start it manually with: tl start", "→".dimmed());
+            // Continue - daemon failure is non-fatal for init
+        }
+    }
+
     // Phase 5: Configuration Synchronization
     sync_configurations(&current_dir, git_initialized || git_exists)?;
 
@@ -213,9 +231,12 @@ fn print_success_summary(repo_root: &Path, git_initialized: bool, jj_initialized
     println!();
 
     println!("Next steps:");
-    println!("  {} tl start       - Start the checkpoint daemon", "→".cyan());
     println!(
         "  {} tl status      - Check daemon and checkpoint status",
+        "→".cyan()
+    );
+    println!(
+        "  {} tl log         - View checkpoint timeline",
         "→".cyan()
     );
     println!(
