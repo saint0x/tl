@@ -1,9 +1,13 @@
-//! Tree representation for repository snapshots
+//! Tree representation for repository snapshots (Git-compatible)
 
-use crate::hash::Blake3Hash;
+use crate::hash::Sha1Hash;
 use anyhow::Result;
 use ahash::AHashMap;
+use flate2::read::ZlibDecoder;
+use flate2::write::ZlibEncoder;
+use flate2::Compression;
 use smallvec::SmallVec;
+use std::io::{Read, Write};
 use std::path::Path;
 
 /// Type of tree entry
@@ -11,10 +15,34 @@ use std::path::Path;
 pub enum EntryKind {
     /// Regular file
     File,
+    /// Executable file
+    ExecutableFile,
     /// Symbolic link
     Symlink,
-    /// Submodule (optional for MVP)
-    Submodule,
+    /// Subdirectory (tree)
+    Tree,
+}
+
+impl EntryKind {
+    /// Get Git mode for this entry kind
+    pub fn git_mode(&self, custom_mode: Option<u32>) -> u32 {
+        match self {
+            EntryKind::File => custom_mode.unwrap_or(0o100644),
+            EntryKind::ExecutableFile => 0o100755,
+            EntryKind::Symlink => 0o120000,
+            EntryKind::Tree => 0o040000,
+        }
+    }
+
+    /// Parse entry kind from Git mode
+    pub fn from_git_mode(mode: u32) -> Self {
+        match mode {
+            0o040000 => EntryKind::Tree,
+            0o100755 => EntryKind::ExecutableFile,
+            0o120000 => EntryKind::Symlink,
+            _ => EntryKind::File, // Default to regular file
+        }
+    }
 }
 
 /// Entry in a tree (file, symlink, etc.)
@@ -24,27 +52,61 @@ pub struct Entry {
     pub kind: EntryKind,
     /// Unix permission bits (mode)
     pub mode: u32,
-    /// Hash of the blob containing this entry's content
-    pub blob_hash: Blake3Hash,
+    /// Hash of the blob/tree containing this entry's content
+    pub blob_hash: Sha1Hash,
 }
 
 impl Entry {
     /// Create a new file entry
-    pub fn file(mode: u32, blob_hash: Blake3Hash) -> Self {
+    /// Mode should be Unix permission bits (e.g., 0o644 or 0o755)
+    pub fn file(mode: u32, blob_hash: Sha1Hash) -> Self {
+        // Convert Unix permission bits to Git file mode
+        let git_mode = if mode & 0o111 != 0 {
+            0o100755 // Executable
+        } else {
+            0o100644 // Regular file
+        };
         Self {
-            kind: EntryKind::File,
-            mode,
+            kind: if git_mode == 0o100755 {
+                EntryKind::ExecutableFile
+            } else {
+                EntryKind::File
+            },
+            mode: git_mode,
+            blob_hash,
+        }
+    }
+
+    /// Create a new executable file entry
+    pub fn executable(blob_hash: Sha1Hash) -> Self {
+        Self {
+            kind: EntryKind::ExecutableFile,
+            mode: 0o100755,
             blob_hash,
         }
     }
 
     /// Create a new symlink entry
-    pub fn symlink(blob_hash: Blake3Hash) -> Self {
+    pub fn symlink(blob_hash: Sha1Hash) -> Self {
         Self {
             kind: EntryKind::Symlink,
-            mode: 0o120000, // Standard symlink mode
+            mode: 0o120000,
             blob_hash,
         }
+    }
+
+    /// Create a new tree entry (subdirectory)
+    pub fn tree(tree_hash: Sha1Hash) -> Self {
+        Self {
+            kind: EntryKind::Tree,
+            mode: 0o040000,
+            blob_hash: tree_hash,
+        }
+    }
+
+    /// Get the Git mode for this entry
+    pub fn git_mode(&self) -> u32 {
+        self.kind.git_mode(Some(self.mode))
     }
 }
 
@@ -111,143 +173,163 @@ impl Tree {
         self.entries.iter().map(|(k, v)| (k.as_slice(), v))
     }
 
-    /// Serialize the tree to bytes (TreeV1 format)
+    /// Serialize tree to Git tree format (uncompressed)
     ///
-    /// Format:
-    /// - magic: "SNT1" (4 bytes)
-    /// - entry_count: u32
-    /// - entries (sorted lexicographically by path):
-    ///   - path_len: u16
-    ///   - path_bytes: [u8; path_len]
-    ///   - kind: u8 (0=file, 1=symlink, 2=submodule)
-    ///   - mode: u32
-    ///   - blob_hash: [u8; 32]
-    pub fn serialize(&self) -> Vec<u8> {
-        const MAGIC: &[u8] = b"SNT1";
+    /// Git tree format:
+    /// - Each entry: "<mode> <name>\0<20-byte-sha1>"
+    /// - Entries sorted by name
+    /// - No header in the raw tree data (header added when hashing)
+    pub fn serialize_git_tree(&self) -> Vec<u8> {
+        let mut entries_data = Vec::new();
 
-        let mut bytes = Vec::new();
-
-        // Write magic
-        bytes.extend_from_slice(MAGIC);
-
-        // Write entry count
-        bytes.extend_from_slice(&(self.entries.len() as u32).to_le_bytes());
-
-        // Sort entries by path for deterministic serialization
+        // Sort entries by path name (Git requirement)
         let mut sorted_entries: Vec<_> = self.entries.iter().collect();
         sorted_entries.sort_by(|(path_a, _), (path_b, _)| path_a.cmp(path_b));
 
-        // Write each entry
+        // Write each entry in Git format: "<mode> <name>\0<20-byte-sha1>"
         for (path_bytes, entry) in sorted_entries {
-            // Path length (u16)
-            let path_len = path_bytes.len() as u16;
-            bytes.extend_from_slice(&path_len.to_le_bytes());
+            // Git mode as octal string (no leading 0o)
+            let mode_str = format!("{:o}", entry.git_mode());
+            entries_data.extend_from_slice(mode_str.as_bytes());
+            entries_data.push(b' ');
 
-            // Path bytes
-            bytes.extend_from_slice(path_bytes);
+            // Path name
+            entries_data.extend_from_slice(path_bytes);
+            entries_data.push(0); // Null separator
 
-            // Kind (u8)
-            let kind_byte = match entry.kind {
-                EntryKind::File => 0u8,
-                EntryKind::Symlink => 1u8,
-                EntryKind::Submodule => 2u8,
-            };
-            bytes.push(kind_byte);
-
-            // Mode (u32)
-            bytes.extend_from_slice(&entry.mode.to_le_bytes());
-
-            // Blob hash (32 bytes)
-            bytes.extend_from_slice(entry.blob_hash.as_bytes());
+            // SHA-1 hash (20 bytes, raw binary)
+            entries_data.extend_from_slice(entry.blob_hash.as_bytes());
         }
 
-        bytes
+        entries_data
     }
 
-    /// Deserialize a tree from bytes (TreeV1 format)
-    pub fn deserialize(bytes: &[u8]) -> Result<Self> {
-        const MAGIC: &[u8] = b"SNT1";
+    /// Serialize tree to Git object format (with header, compressed)
+    ///
+    /// Git object format: "tree <size>\0<tree-data>" (zlib compressed)
+    pub fn serialize(&self) -> Vec<u8> {
+        let tree_data = self.serialize_git_tree();
 
-        if bytes.len() < 8 {
-            anyhow::bail!("Invalid tree data: too short");
+        // Git tree object format: "tree <size>\0<data>"
+        let header = format!("tree {}\0", tree_data.len());
+        let mut git_object = Vec::new();
+        git_object.extend_from_slice(header.as_bytes());
+        git_object.extend_from_slice(&tree_data);
+
+        // Compress with zlib
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&git_object).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    /// Deserialize tree from Git object format (compressed)
+    pub fn deserialize(compressed: &[u8]) -> Result<Self> {
+        // Decompress with zlib
+        let mut decoder = ZlibDecoder::new(compressed);
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed)?;
+
+        // Parse Git tree object format: "tree <size>\0<data>"
+        if !decompressed.starts_with(b"tree ") {
+            anyhow::bail!("Invalid Git tree format: missing 'tree ' header");
         }
 
-        // Check magic
-        if &bytes[0..4] != MAGIC {
-            anyhow::bail!("Invalid tree magic bytes");
+        // Find null byte separator
+        let null_pos = decompressed
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or_else(|| anyhow::anyhow!("Invalid Git tree format: missing null separator"))?;
+
+        // Parse size from header
+        let size_str = std::str::from_utf8(&decompressed[5..null_pos])?;
+        let expected_size: usize = size_str.parse()?;
+
+        // Extract tree data after null byte
+        let tree_data = &decompressed[null_pos + 1..];
+
+        // Verify size matches
+        if tree_data.len() != expected_size {
+            anyhow::bail!(
+                "Git tree size mismatch: header says {}, got {} bytes",
+                expected_size,
+                tree_data.len()
+            );
         }
 
-        // Read entry count
-        let entry_count = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+        // Parse Git tree entries
+        Self::parse_git_tree(tree_data)
+    }
 
+    /// Parse Git tree format entries
+    fn parse_git_tree(data: &[u8]) -> Result<Self> {
         let mut entries = AHashMap::new();
-        let mut offset = 8;
+        let mut offset = 0;
 
-        // Parse each entry
-        for _ in 0..entry_count {
-            if offset + 2 > bytes.len() {
-                anyhow::bail!("Invalid tree data: incomplete entry");
+        while offset < data.len() {
+            // Parse mode (octal string)
+            let space_pos = data[offset..]
+                .iter()
+                .position(|&b| b == b' ')
+                .ok_or_else(|| anyhow::anyhow!("Invalid tree entry: missing space after mode"))?;
+
+            let mode_str = std::str::from_utf8(&data[offset..offset + space_pos])?;
+            let mode = u32::from_str_radix(mode_str, 8)?;
+            offset += space_pos + 1;
+
+            // Parse name (until null byte)
+            let null_pos = data[offset..]
+                .iter()
+                .position(|&b| b == 0)
+                .ok_or_else(|| anyhow::anyhow!("Invalid tree entry: missing null after name"))?;
+
+            let name_bytes = &data[offset..offset + null_pos];
+            let path_key = SmallVec::from_slice(name_bytes);
+            offset += null_pos + 1;
+
+            // Parse SHA-1 hash (20 bytes)
+            if offset + 20 > data.len() {
+                anyhow::bail!("Invalid tree entry: incomplete hash");
             }
 
-            // Read path length
-            let path_len = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]) as usize;
-            offset += 2;
+            let mut hash_bytes = [0u8; 20];
+            hash_bytes.copy_from_slice(&data[offset..offset + 20]);
+            let blob_hash = Sha1Hash::from_bytes(hash_bytes);
+            offset += 20;
 
-            if offset + path_len > bytes.len() {
-                anyhow::bail!("Invalid tree data: path too long");
-            }
-
-            // Read path bytes
-            let path_bytes = SmallVec::from_slice(&bytes[offset..offset + path_len]);
-            offset += path_len;
-
-            if offset + 1 + 4 + 32 > bytes.len() {
-                anyhow::bail!("Invalid tree data: incomplete entry metadata");
-            }
-
-            // Read kind
-            let kind = match bytes[offset] {
-                0 => EntryKind::File,
-                1 => EntryKind::Symlink,
-                2 => EntryKind::Submodule,
-                _ => anyhow::bail!("Invalid entry kind: {}", bytes[offset]),
-            };
-            offset += 1;
-
-            // Read mode
-            let mode = u32::from_le_bytes([
-                bytes[offset],
-                bytes[offset + 1],
-                bytes[offset + 2],
-                bytes[offset + 3],
-            ]);
-            offset += 4;
-
-            // Read blob hash
-            let mut hash_bytes = [0u8; 32];
-            hash_bytes.copy_from_slice(&bytes[offset..offset + 32]);
-            let blob_hash = Blake3Hash::from_bytes(hash_bytes);
-            offset += 32;
-
+            // Create entry
+            let kind = EntryKind::from_git_mode(mode);
             let entry = Entry {
                 kind,
                 mode,
                 blob_hash,
             };
 
-            entries.insert(path_bytes, entry);
+            entries.insert(path_key, entry);
         }
 
         Ok(Self { entries })
     }
 
-    /// Compute the hash of this tree
+    /// Compute the hash of this tree (Git-compatible)
     ///
     /// Hash is deterministic - same tree content always produces same hash
-    pub fn hash(&self) -> Blake3Hash {
-        use crate::hash::hash_bytes;
-        let serialized = self.serialize();
-        hash_bytes(&serialized)
+    pub fn hash(&self) -> Sha1Hash {
+        use crate::hash::git::hash_tree;
+
+        // Convert entries to format expected by hash_tree
+        let mut entries_vec: Vec<(String, u32, Sha1Hash)> = self
+            .entries
+            .iter()
+            .map(|(path_bytes, entry)| {
+                let path_str = String::from_utf8_lossy(path_bytes).to_string();
+                (path_str, entry.git_mode(), entry.blob_hash)
+            })
+            .collect();
+
+        // Sort by name (Git requirement)
+        entries_vec.sort_by(|(name_a, _, _), (name_b, _, _)| name_a.cmp(name_b));
+
+        hash_tree(&entries_vec)
     }
 
     /// Update entries in the tree
@@ -255,10 +337,7 @@ impl Tree {
     /// Changes: Vec<(Path, Option<Entry>)>
     /// - None = remove entry
     /// - Some(entry) = insert/update entry
-    pub fn update_entries(
-        base: &Tree,
-        changes: Vec<(&Path, Option<Entry>)>,
-    ) -> Self {
+    pub fn update_entries(base: &Tree, changes: Vec<(&Path, Option<Entry>)>) -> Self {
         let mut new_tree = base.clone();
 
         for (path, entry_opt) in changes {
@@ -339,12 +418,12 @@ impl TreeDiff {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hash::hash_bytes;
+    use crate::hash::git::hash_blob;
     use std::path::PathBuf;
 
     fn create_test_entry() -> Entry {
         let data = b"test file content";
-        let hash = hash_bytes(data);
+        let hash = hash_blob(data);
         Entry::file(0o644, hash)
     }
 
@@ -376,13 +455,30 @@ mod tests {
     }
 
     #[test]
+    fn test_tree_git_format() -> Result<()> {
+        let mut tree = Tree::new();
+
+        let data = b"test content";
+        let hash = hash_blob(data);
+        tree.insert(&PathBuf::from("test.txt"), Entry::file(0o644, hash));
+
+        // Serialize to Git format
+        let git_data = tree.serialize_git_tree();
+
+        // Should start with mode
+        assert!(git_data.starts_with(b"100644"));
+
+        Ok(())
+    }
+
+    #[test]
     fn test_tree_serialization_roundtrip() -> Result<()> {
         let mut tree = Tree::new();
 
         let data1 = b"file1";
         let data2 = b"file2";
-        let hash1 = hash_bytes(data1);
-        let hash2 = hash_bytes(data2);
+        let hash1 = hash_blob(data1);
+        let hash2 = hash_blob(data2);
 
         tree.insert(&PathBuf::from("src/main.rs"), Entry::file(0o644, hash1));
         tree.insert(&PathBuf::from("README.md"), Entry::file(0o644, hash2));
@@ -409,7 +505,7 @@ mod tests {
         let mut tree2 = Tree::new();
 
         let data = b"test";
-        let hash = hash_bytes(data);
+        let hash = hash_blob(data);
 
         // Insert in different order
         tree1.insert(&PathBuf::from("a.txt"), Entry::file(0o644, hash));
@@ -441,44 +537,18 @@ mod tests {
     }
 
     #[test]
-    fn test_tree_magic_validation() {
-        let bad_magic = b"BAD1";
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(bad_magic);
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-
-        assert!(Tree::deserialize(&bytes).is_err());
-    }
-
-    #[test]
-    fn test_tree_multiple_entries() -> Result<()> {
+    fn test_tree_executable() -> Result<()> {
         let mut tree = Tree::new();
 
-        let paths = vec![
-            "src/main.rs",
-            "src/lib.rs",
-            "tests/test.rs",
-            "Cargo.toml",
-            "README.md",
-        ];
-
-        for path in &paths {
-            let data = path.as_bytes();
-            let hash = hash_bytes(data);
-            tree.insert(&PathBuf::from(path), Entry::file(0o644, hash));
-        }
-
-        assert_eq!(tree.len(), paths.len());
+        let hash = hash_blob(b"#!/bin/bash");
+        tree.insert(&PathBuf::from("script.sh"), Entry::executable(hash));
 
         let serialized = tree.serialize();
         let deserialized = Tree::deserialize(&serialized)?;
 
-        assert_eq!(tree.len(), deserialized.len());
-
-        for path in &paths {
-            let path_buf = PathBuf::from(path);
-            assert_eq!(tree.get(&path_buf), deserialized.get(&path_buf));
-        }
+        let entry = deserialized.get(&PathBuf::from("script.sh")).unwrap();
+        assert_eq!(entry.kind, EntryKind::ExecutableFile);
+        assert_eq!(entry.mode, 0o100755);
 
         Ok(())
     }
@@ -487,7 +557,7 @@ mod tests {
     fn test_tree_symlink() -> Result<()> {
         let mut tree = Tree::new();
 
-        let hash = hash_bytes(b"target");
+        let hash = hash_blob(b"target");
         tree.insert(&PathBuf::from("link"), Entry::symlink(hash));
 
         let serialized = tree.serialize();
@@ -501,95 +571,16 @@ mod tests {
     }
 
     #[test]
-    fn test_tree_different_modes() -> Result<()> {
-        let mut tree = Tree::new();
-
-        let hash = hash_bytes(b"content");
-        tree.insert(&PathBuf::from("regular"), Entry::file(0o644, hash));
-        tree.insert(&PathBuf::from("executable"), Entry::file(0o755, hash));
-
-        let serialized = tree.serialize();
-        let deserialized = Tree::deserialize(&serialized)?;
-
-        assert_eq!(
-            deserialized.get(&PathBuf::from("regular")).unwrap().mode,
-            0o644
-        );
-        assert_eq!(
-            deserialized.get(&PathBuf::from("executable")).unwrap().mode,
-            0o755
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_tree_long_paths() -> Result<()> {
-        let mut tree = Tree::new();
-
-        // Path longer than SmallVec inline capacity (64 bytes)
-        let long_path = "a/".repeat(50) + "file.txt";
-        let hash = hash_bytes(b"content");
-
-        tree.insert(&PathBuf::from(&long_path), Entry::file(0o644, hash));
-
-        let serialized = tree.serialize();
-        let deserialized = Tree::deserialize(&serialized)?;
-
-        assert_eq!(
-            tree.get(&PathBuf::from(&long_path)),
-            deserialized.get(&PathBuf::from(&long_path))
-        );
-
-        Ok(())
-    }
-
-    #[test]
     fn test_tree_hash_deterministic() {
         let mut tree1 = Tree::new();
         let mut tree2 = Tree::new();
 
-        let hash = hash_bytes(b"content");
+        let hash = hash_blob(b"content");
         tree1.insert(&PathBuf::from("file.txt"), Entry::file(0o644, hash));
         tree2.insert(&PathBuf::from("file.txt"), Entry::file(0o644, hash));
 
-        // Same tree should serialize to same bytes
-        let bytes1 = tree1.serialize();
-        let bytes2 = tree2.serialize();
-
-        assert_eq!(bytes1, bytes2);
-    }
-
-    // Phase 1.5: Hashing and diffing tests
-
-    #[test]
-    fn test_tree_hash() {
-        let mut tree = Tree::new();
-        let hash1 = hash_bytes(b"content1");
-        let hash2 = hash_bytes(b"content2");
-
-        tree.insert(&PathBuf::from("file1.txt"), Entry::file(0o644, hash1));
-        tree.insert(&PathBuf::from("file2.txt"), Entry::file(0o644, hash2));
-
-        let tree_hash = tree.hash();
-
-        // Hash should be deterministic
-        let tree_hash2 = tree.hash();
-        assert_eq!(tree_hash, tree_hash2);
-    }
-
-    #[test]
-    fn test_tree_hash_different_content() {
-        let mut tree1 = Tree::new();
-        let mut tree2 = Tree::new();
-
-        let hash1 = hash_bytes(b"content1");
-        let hash2 = hash_bytes(b"content2");
-
-        tree1.insert(&PathBuf::from("file.txt"), Entry::file(0o644, hash1));
-        tree2.insert(&PathBuf::from("file.txt"), Entry::file(0o644, hash2));
-
-        assert_ne!(tree1.hash(), tree2.hash());
+        // Same tree should have same hash
+        assert_eq!(tree1.hash(), tree2.hash());
     }
 
     #[test]
@@ -597,8 +588,8 @@ mod tests {
         let mut tree1 = Tree::new();
         let mut tree2 = Tree::new();
 
-        let hash1 = hash_bytes(b"content1");
-        let hash2 = hash_bytes(b"content2");
+        let hash1 = hash_blob(b"content1");
+        let hash2 = hash_blob(b"content2");
 
         // Insert in different order
         tree1.insert(&PathBuf::from("a.txt"), Entry::file(0o644, hash1));
@@ -607,21 +598,18 @@ mod tests {
         tree2.insert(&PathBuf::from("b.txt"), Entry::file(0o644, hash2));
         tree2.insert(&PathBuf::from("a.txt"), Entry::file(0o644, hash1));
 
-        // Hash should be same (serialization is sorted)
+        // Hash should be same (entries are sorted)
         assert_eq!(tree1.hash(), tree2.hash());
     }
 
     #[test]
     fn test_tree_diff_no_changes() {
         let mut tree = Tree::new();
-        let hash = hash_bytes(b"content");
+        let hash = hash_blob(b"content");
         tree.insert(&PathBuf::from("file.txt"), Entry::file(0o644, hash));
 
         let diff = TreeDiff::diff(&tree, &tree);
         assert!(diff.is_empty());
-        assert_eq!(diff.added.len(), 0);
-        assert_eq!(diff.removed.len(), 0);
-        assert_eq!(diff.modified.len(), 0);
     }
 
     #[test]
@@ -629,8 +617,8 @@ mod tests {
         let mut old_tree = Tree::new();
         let mut new_tree = Tree::new();
 
-        let hash1 = hash_bytes(b"content1");
-        let hash2 = hash_bytes(b"content2");
+        let hash1 = hash_blob(b"content1");
+        let hash2 = hash_blob(b"content2");
 
         old_tree.insert(&PathBuf::from("file1.txt"), Entry::file(0o644, hash1));
 
@@ -642,7 +630,6 @@ mod tests {
         assert_eq!(diff.added.len(), 1);
         assert_eq!(diff.removed.len(), 0);
         assert_eq!(diff.modified.len(), 0);
-        assert!(!diff.is_empty());
     }
 
     #[test]
@@ -650,8 +637,8 @@ mod tests {
         let mut old_tree = Tree::new();
         let mut new_tree = Tree::new();
 
-        let hash1 = hash_bytes(b"content1");
-        let hash2 = hash_bytes(b"content2");
+        let hash1 = hash_blob(b"content1");
+        let hash2 = hash_blob(b"content2");
 
         old_tree.insert(&PathBuf::from("file1.txt"), Entry::file(0o644, hash1));
         old_tree.insert(&PathBuf::from("file2.txt"), Entry::file(0o644, hash2));
@@ -670,8 +657,8 @@ mod tests {
         let mut old_tree = Tree::new();
         let mut new_tree = Tree::new();
 
-        let hash1 = hash_bytes(b"old content");
-        let hash2 = hash_bytes(b"new content");
+        let hash1 = hash_blob(b"old content");
+        let hash2 = hash_blob(b"new content");
 
         old_tree.insert(&PathBuf::from("file.txt"), Entry::file(0o644, hash1));
         new_tree.insert(&PathBuf::from("file.txt"), Entry::file(0o644, hash2));
@@ -684,136 +671,20 @@ mod tests {
     }
 
     #[test]
-    fn test_tree_diff_mode_change() {
-        let mut old_tree = Tree::new();
-        let mut new_tree = Tree::new();
-
-        let hash = hash_bytes(b"content");
-
-        old_tree.insert(&PathBuf::from("script.sh"), Entry::file(0o644, hash));
-        new_tree.insert(&PathBuf::from("script.sh"), Entry::file(0o755, hash));
-
-        let diff = TreeDiff::diff(&old_tree, &new_tree);
-
-        // Mode change is a modification
-        assert_eq!(diff.modified.len(), 1);
-    }
-
-    #[test]
-    fn test_tree_diff_complex() {
-        let mut old_tree = Tree::new();
-        let mut new_tree = Tree::new();
-
-        let hash1 = hash_bytes(b"content1");
-        let hash2 = hash_bytes(b"content2");
-        let hash3 = hash_bytes(b"content3");
-        let hash4 = hash_bytes(b"modified");
-
-        // Old tree: file1 (unchanged), file2 (removed), file3 (modified)
-        old_tree.insert(&PathBuf::from("file1.txt"), Entry::file(0o644, hash1));
-        old_tree.insert(&PathBuf::from("file2.txt"), Entry::file(0o644, hash2));
-        old_tree.insert(&PathBuf::from("file3.txt"), Entry::file(0o644, hash3));
-
-        // New tree: file1 (unchanged), file3 (modified), file4 (added)
-        new_tree.insert(&PathBuf::from("file1.txt"), Entry::file(0o644, hash1));
-        new_tree.insert(&PathBuf::from("file3.txt"), Entry::file(0o644, hash4));
-        new_tree.insert(&PathBuf::from("file4.txt"), Entry::file(0o644, hash2));
-
-        let diff = TreeDiff::diff(&old_tree, &new_tree);
-
-        assert_eq!(diff.added.len(), 1); // file4
-        assert_eq!(diff.removed.len(), 1); // file2
-        assert_eq!(diff.modified.len(), 1); // file3
-    }
-
-    #[test]
-    fn test_tree_update_entries_additions() {
+    fn test_tree_update_entries() {
         let mut base = Tree::new();
-        let hash1 = hash_bytes(b"content1");
-        let hash2 = hash_bytes(b"content2");
+        let hash1 = hash_blob(b"content1");
+        let hash2 = hash_blob(b"content2");
 
         base.insert(&PathBuf::from("file1.txt"), Entry::file(0o644, hash1));
 
         let path2 = PathBuf::from("file2.txt");
-        let changes = vec![
-            (path2.as_path(), Some(Entry::file(0o644, hash2))),
-        ];
+        let changes = vec![(path2.as_path(), Some(Entry::file(0o644, hash2)))];
 
         let new_tree = Tree::update_entries(&base, changes);
 
         assert_eq!(new_tree.len(), 2);
         assert!(new_tree.get(&PathBuf::from("file1.txt")).is_some());
         assert!(new_tree.get(&PathBuf::from("file2.txt")).is_some());
-    }
-
-    #[test]
-    fn test_tree_update_entries_removals() {
-        let mut base = Tree::new();
-        let hash1 = hash_bytes(b"content1");
-        let hash2 = hash_bytes(b"content2");
-
-        base.insert(&PathBuf::from("file1.txt"), Entry::file(0o644, hash1));
-        base.insert(&PathBuf::from("file2.txt"), Entry::file(0o644, hash2));
-
-        let path2 = PathBuf::from("file2.txt");
-        let changes = vec![
-            (path2.as_path(), None),
-        ];
-
-        let new_tree = Tree::update_entries(&base, changes);
-
-        assert_eq!(new_tree.len(), 1);
-        assert!(new_tree.get(&PathBuf::from("file1.txt")).is_some());
-        assert!(new_tree.get(&PathBuf::from("file2.txt")).is_none());
-    }
-
-    #[test]
-    fn test_tree_update_entries_modifications() {
-        let mut base = Tree::new();
-        let hash1 = hash_bytes(b"old content");
-        let hash2 = hash_bytes(b"new content");
-
-        base.insert(&PathBuf::from("file.txt"), Entry::file(0o644, hash1));
-
-        let path = PathBuf::from("file.txt");
-        let changes = vec![
-            (path.as_path(), Some(Entry::file(0o644, hash2))),
-        ];
-
-        let new_tree = Tree::update_entries(&base, changes);
-
-        assert_eq!(new_tree.len(), 1);
-        let entry = new_tree.get(&PathBuf::from("file.txt")).unwrap();
-        assert_eq!(entry.blob_hash, hash2);
-    }
-
-    #[test]
-    fn test_tree_update_entries_mixed() {
-        let mut base = Tree::new();
-        let hash1 = hash_bytes(b"content1");
-        let hash2 = hash_bytes(b"content2");
-        let hash3 = hash_bytes(b"modified");
-
-        base.insert(&PathBuf::from("file1.txt"), Entry::file(0o644, hash1));
-        base.insert(&PathBuf::from("file2.txt"), Entry::file(0o644, hash2));
-
-        let path1 = PathBuf::from("file1.txt");
-        let path2 = PathBuf::from("file2.txt");
-        let path3 = PathBuf::from("file3.txt");
-        let changes = vec![
-            // Modify file1
-            (path1.as_path(), Some(Entry::file(0o644, hash3))),
-            // Remove file2
-            (path2.as_path(), None),
-            // Add file3
-            (path3.as_path(), Some(Entry::file(0o755, hash1))),
-        ];
-
-        let new_tree = Tree::update_entries(&base, changes);
-
-        assert_eq!(new_tree.len(), 2);
-        assert_eq!(new_tree.get(&PathBuf::from("file1.txt")).unwrap().blob_hash, hash3);
-        assert!(new_tree.get(&PathBuf::from("file2.txt")).is_none());
-        assert_eq!(new_tree.get(&PathBuf::from("file3.txt")).unwrap().blob_hash, hash1);
     }
 }

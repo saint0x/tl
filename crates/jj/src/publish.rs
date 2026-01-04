@@ -209,7 +209,7 @@ pub fn publish_range(
 mod tests {
     use super::*;
     use journal::{Checkpoint, CheckpointMeta, CheckpointReason};
-    use tl_core::{Blake3Hash, Entry, Tree, Store};
+    use tl_core::{Sha1Hash, Entry, Tree, Store};
     use tempfile::TempDir;
     use std::fs;
     use std::path::PathBuf;
@@ -217,7 +217,7 @@ mod tests {
     fn create_test_checkpoint() -> Checkpoint {
         Checkpoint::new(
             None,
-            Blake3Hash::from_bytes([1u8; 32]),
+            Sha1Hash::from_bytes([1u8; 20]),
             CheckpointReason::FsBatch,
             vec![PathBuf::from("test.txt")],
             CheckpointMeta {
@@ -228,7 +228,7 @@ mod tests {
         )
     }
 
-    fn create_test_store_with_tree(temp_dir: &TempDir, include_files: bool) -> Result<(Store, Blake3Hash)> {
+    fn create_test_store_with_tree(temp_dir: &TempDir, include_files: bool) -> Result<(Store, Sha1Hash)> {
         let repo_root = temp_dir.path();
         let store = Store::init(repo_root)?;
 
@@ -246,8 +246,8 @@ mod tests {
 
         // Create tree
         let mut tree = Tree::new();
-        let blob1 = tl_core::hash::hash_bytes(b"Hello World");
-        let blob2 = tl_core::hash::hash_bytes(b"Nested content");
+        let blob1 = tl_core::hash::git::hash_blob(b"Hello World");
+        let blob2 = tl_core::hash::git::hash_blob(b"Nested content");
 
         store.blob_store().write_blob(blob1, b"Hello World")?;
         store.blob_store().write_blob(blob2, b"Nested content")?;
@@ -304,7 +304,7 @@ mod tests {
 
         // Create executable file
         let mut tree = Tree::new();
-        let blob = tl_core::hash::hash_bytes(b"#!/bin/bash\necho hello");
+        let blob = tl_core::hash::git::hash_blob(b"#!/bin/bash\necho hello");
         store.blob_store().write_blob(blob, b"#!/bin/bash\necho hello")?;
         tree.insert(&PathBuf::from("script.sh"), Entry::file(0o755, blob));
         let tree_hash = store.write_tree(&tree)?;
@@ -338,7 +338,7 @@ mod tests {
 
         // Create tree with protected paths
         let mut tree = Tree::new();
-        let blob = tl_core::hash::hash_bytes(b"content");
+        let blob = tl_core::hash::git::hash_blob(b"content");
         store.blob_store().write_blob(blob, b"content")?;
 
         tree.insert(&PathBuf::from(".tl/config"), Entry::file(0o644, blob));
@@ -379,7 +379,7 @@ mod tests {
 
         // Create deep directory structure
         let mut tree = Tree::new();
-        let blob = tl_core::hash::hash_bytes(b"deep");
+        let blob = tl_core::hash::git::hash_blob(b"deep");
         store.blob_store().write_blob(blob, b"deep")?;
 
         tree.insert(&PathBuf::from("a/b/c/d/e/deep.txt"), Entry::file(0o644, blob));
@@ -570,7 +570,7 @@ mod tests {
         // Create symlink entry
         let target = PathBuf::from("../target");
         let target_bytes = target.to_string_lossy();
-        let blob = tl_core::hash::hash_bytes(target_bytes.as_bytes());
+        let blob = tl_core::hash::git::hash_blob(target_bytes.as_bytes());
         store.blob_store().write_blob(blob, target_bytes.as_bytes())?;
 
         let mut tree = Tree::new();
@@ -655,7 +655,7 @@ mod tests {
 
         // Create file in nested directory that doesn't exist yet
         let mut tree = Tree::new();
-        let blob = tl_core::hash::hash_bytes(b"nested");
+        let blob = tl_core::hash::git::hash_blob(b"nested");
         store.blob_store().write_blob(blob, b"nested")?;
         tree.insert(&PathBuf::from("does/not/exist/file.txt"), Entry::file(0o644, blob));
 

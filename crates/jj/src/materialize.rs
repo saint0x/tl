@@ -213,14 +213,14 @@ mod tests {
     use super::*;
     use journal::{CheckpointMeta, CheckpointReason};
     use std::path::PathBuf;
-    use tl_core::Blake3Hash;
+    use tl_core::Sha1Hash;
     use ulid::Ulid;
 
     fn test_checkpoint() -> Checkpoint {
         Checkpoint {
             id: Ulid::new(),
             parent: None,
-            root_tree: Blake3Hash::from_bytes([0u8; 32]),
+            root_tree: Sha1Hash::from_bytes([0u8; 20]),
             ts_unix_ms: 1704067200000,
             reason: CheckpointReason::Manual,
             touched_paths: vec![

@@ -1,7 +1,7 @@
 //! Timelapse Core - Content-addressed storage primitives for Timelapse checkpoint system
 //!
 //! This crate provides the foundational storage layer:
-//! - BLAKE3 hashing
+//! - SHA-1 hashing (Git-compatible)
 //! - Blob storage with compression
 //! - Tree representation and diffing
 //! - On-disk store management
@@ -12,7 +12,7 @@ pub mod tree;
 pub mod store;
 
 // Re-export main types for convenience
-pub use hash::{Blake3Hash, IncrementalHasher};
+pub use hash::{Sha1Hash, IncrementalHasher};
 pub use blob::{Blob, BlobStore, BlobHeaderV1};
 pub use tree::{Tree, Entry, EntryKind, TreeDiff};
 pub use store::Store;

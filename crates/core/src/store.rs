@@ -1,7 +1,7 @@
 //! On-disk store management for blobs and trees
 
 use crate::blob::BlobStore;
-use crate::hash::Blake3Hash;
+use crate::hash::Sha1Hash;
 use crate::tree::Tree;
 use anyhow::{Context, Result};
 use dashmap::DashMap;
@@ -43,7 +43,7 @@ pub struct Store {
     /// Blob storage
     blob_store: BlobStore,
     /// Tree cache (hash -> tree)
-    tree_cache: DashMap<Blake3Hash, Arc<Tree>>,
+    tree_cache: DashMap<Sha1Hash, Arc<Tree>>,
 }
 
 impl Store {
@@ -152,7 +152,7 @@ email = ""
     }
 
     /// Write a tree to storage
-    pub fn write_tree(&self, tree: &Tree) -> Result<Blake3Hash> {
+    pub fn write_tree(&self, tree: &Tree) -> Result<Sha1Hash> {
         use std::fs;
         use std::io::Write;
 
@@ -199,7 +199,7 @@ email = ""
     }
 
     /// Read a tree from storage
-    pub fn read_tree(&self, hash: Blake3Hash) -> Result<Tree> {
+    pub fn read_tree(&self, hash: Sha1Hash) -> Result<Tree> {
         use std::fs;
 
         // Check cache first
@@ -233,7 +233,7 @@ email = ""
     }
 
     /// Get the tree path for a given hash
-    fn tree_path(&self, hash: Blake3Hash) -> PathBuf {
+    fn tree_path(&self, hash: Sha1Hash) -> PathBuf {
         // Fan-out structure: objects/trees/<hh>/<rest>
         // Example: hash "abcd1234..." -> objects/trees/ab/cd1234...
         let hex = hash.to_hex();
@@ -523,7 +523,7 @@ mod tests {
 
     #[test]
     fn test_store_write_read_tree() -> Result<()> {
-        use crate::hash::hash_bytes;
+        use crate::hash::git::hash_blob;
         use crate::tree::{Entry, Tree};
 
         let temp_dir = tempfile::tempdir()?;
@@ -533,8 +533,8 @@ mod tests {
 
         // Create a tree
         let mut tree = Tree::new();
-        let hash1 = hash_bytes(b"content1");
-        let hash2 = hash_bytes(b"content2");
+        let hash1 = hash_blob(b"content1");
+        let hash2 = hash_blob(b"content2");
         tree.insert(Path::new("file1.txt"), Entry::file(0o644, hash1));
         tree.insert(Path::new("file2.txt"), Entry::file(0o644, hash2));
 
@@ -553,7 +553,7 @@ mod tests {
 
     #[test]
     fn test_store_tree_cache() -> Result<()> {
-        use crate::hash::hash_bytes;
+        use crate::hash::git::hash_blob;
         use crate::tree::{Entry, Tree};
 
         let temp_dir = tempfile::tempdir()?;
@@ -563,7 +563,7 @@ mod tests {
 
         // Create and write a tree
         let mut tree = Tree::new();
-        let hash1 = hash_bytes(b"cached content");
+        let hash1 = hash_blob(b"cached content");
         tree.insert(Path::new("file.txt"), Entry::file(0o644, hash1));
 
         let tree_hash = store.write_tree(&tree)?;
@@ -579,7 +579,7 @@ mod tests {
 
     #[test]
     fn test_store_tree_idempotent_write() -> Result<()> {
-        use crate::hash::hash_bytes;
+        use crate::hash::git::hash_blob;
         use crate::tree::{Entry, Tree};
 
         let temp_dir = tempfile::tempdir()?;
@@ -589,7 +589,7 @@ mod tests {
 
         // Create a tree
         let mut tree = Tree::new();
-        let hash1 = hash_bytes(b"idempotent");
+        let hash1 = hash_blob(b"idempotent");
         tree.insert(Path::new("file.txt"), Entry::file(0o644, hash1));
 
         // Write it twice

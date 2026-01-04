@@ -3,7 +3,7 @@
 //! The performance linchpin: update tree from dirty paths without full rescan
 
 use anyhow::Result;
-use core::{hash, Blake3Hash, Entry, Store, Tree};
+use core::{hash, Sha1Hash, Entry, Store, Tree};
 use crate::PathMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -16,7 +16,7 @@ pub fn incremental_update(
     dirty_paths: Vec<&Path>,
     repo_root: &Path,
     store: &Store,
-) -> Result<(PathMap, Tree, Blake3Hash)> {
+) -> Result<(PathMap, Tree, Sha1Hash)> {
     // Step 1: Normalize and deduplicate dirty paths
     let normalized = normalize_dirty_paths(dirty_paths, repo_root)?;
 

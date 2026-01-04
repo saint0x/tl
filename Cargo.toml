@@ -11,6 +11,8 @@ members = [
 [workspace.dependencies]
 # Core hashing and storage
 blake3 = { version = "1.5", features = ["rayon", "mmap"] }
+sha1 = "0.10"
+flate2 = "1.0"
 memmap2 = "0.9"
 sled = "0.34"
 

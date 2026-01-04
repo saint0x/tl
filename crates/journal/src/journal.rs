@@ -425,11 +425,11 @@ impl RepairResult {
 mod tests {
     use super::*;
     use crate::{CheckpointMeta, CheckpointReason};
-    use core::Blake3Hash;
+    use core::Sha1Hash;
     use tempfile::TempDir;
 
     fn create_test_checkpoint(parent: Option<Ulid>) -> Checkpoint {
-        let root_tree = Blake3Hash::from_bytes([1u8; 32]);
+        let root_tree = Sha1Hash::from_bytes([1u8; 20]);
         let meta = CheckpointMeta {
             files_changed: 1,
             bytes_added: 100,

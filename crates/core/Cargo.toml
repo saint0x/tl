@@ -9,6 +9,8 @@ repository.workspace = true
 [dependencies]
 # Core hashing and storage
 blake3 = { workspace = true }
+sha1 = { workspace = true }
+flate2 = { workspace = true }
 memmap2 = { workspace = true }
 
 # Concurrency

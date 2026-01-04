@@ -1,7 +1,7 @@
 //! Retention policies and garbage collection
 
 use anyhow::Result;
-use core::{Blake3Hash, Store};
+use core::{Sha1Hash, Store};
 use crate::Journal;
 use std::collections::HashSet;
 use std::fs;
@@ -220,7 +220,7 @@ impl GarbageCollector {
         live_checkpoints: &HashSet<Ulid>,
         journal: &Journal,
         store: &Store,
-    ) -> Result<(HashSet<Blake3Hash>, HashSet<Blake3Hash>)> {
+    ) -> Result<(HashSet<Sha1Hash>, HashSet<Sha1Hash>)> {
         let mut live_trees = HashSet::new();
         let mut live_blobs = HashSet::new();
 
@@ -244,8 +244,8 @@ impl GarbageCollector {
     fn sweep_dead_objects(
         &self,
         live_checkpoints: &HashSet<Ulid>,
-        live_trees: &HashSet<Blake3Hash>,
-        live_blobs: &HashSet<Blake3Hash>,
+        live_trees: &HashSet<Sha1Hash>,
+        live_blobs: &HashSet<Sha1Hash>,
         journal: &Journal,
         store: &Store,
         metrics: &mut GcMetrics,
@@ -282,7 +282,7 @@ impl GarbageCollector {
 }
 
 /// Enumerate all stored trees
-fn enumerate_stored_trees(store: &Store) -> Result<Vec<Blake3Hash>> {
+fn enumerate_stored_trees(store: &Store) -> Result<Vec<Sha1Hash>> {
     let trees_dir = store.tl_dir().join("objects/trees");
     let mut hashes = Vec::new();
 
@@ -306,7 +306,7 @@ fn enumerate_stored_trees(store: &Store) -> Result<Vec<Blake3Hash>> {
                     let filename = file_entry.file_name().to_string_lossy().to_string();
                     let hex = format!("{}{}", prefix, filename);
 
-                    if let Ok(hash) = Blake3Hash::from_hex(&hex) {
+                    if let Ok(hash) = Sha1Hash::from_hex(&hex) {
                         hashes.push(hash);
                     }
                 }
@@ -318,7 +318,7 @@ fn enumerate_stored_trees(store: &Store) -> Result<Vec<Blake3Hash>> {
 }
 
 /// Enumerate all stored blobs
-fn enumerate_stored_blobs(store: &Store) -> Result<Vec<Blake3Hash>> {
+fn enumerate_stored_blobs(store: &Store) -> Result<Vec<Sha1Hash>> {
     let blobs_dir = store.tl_dir().join("objects/blobs");
     let mut hashes = Vec::new();
 
@@ -342,7 +342,7 @@ fn enumerate_stored_blobs(store: &Store) -> Result<Vec<Blake3Hash>> {
                     let filename = file_entry.file_name().to_string_lossy().to_string();
                     let hex = format!("{}{}", prefix, filename);
 
-                    if let Ok(hash) = Blake3Hash::from_hex(&hex) {
+                    if let Ok(hash) = Sha1Hash::from_hex(&hex) {
                         hashes.push(hash);
                     }
                 }
@@ -354,7 +354,7 @@ fn enumerate_stored_blobs(store: &Store) -> Result<Vec<Blake3Hash>> {
 }
 
 /// Get blob size
-fn get_blob_size(store: &Store, hash: Blake3Hash) -> Result<u64> {
+fn get_blob_size(store: &Store, hash: Sha1Hash) -> Result<u64> {
     let hex = hash.to_hex();
     let (prefix, rest) = hex.split_at(2);
     let blob_path = store
@@ -368,7 +368,7 @@ fn get_blob_size(store: &Store, hash: Blake3Hash) -> Result<u64> {
 }
 
 /// Delete a tree
-fn delete_tree(store: &Store, hash: Blake3Hash) -> Result<()> {
+fn delete_tree(store: &Store, hash: Sha1Hash) -> Result<()> {
     let hex = hash.to_hex();
     let (prefix, rest) = hex.split_at(2);
     let tree_path = store
@@ -385,7 +385,7 @@ fn delete_tree(store: &Store, hash: Blake3Hash) -> Result<()> {
 }
 
 /// Delete a blob
-fn delete_blob(store: &Store, hash: Blake3Hash) -> Result<()> {
+fn delete_blob(store: &Store, hash: Sha1Hash) -> Result<()> {
     let hex = hash.to_hex();
     let (prefix, rest) = hex.split_at(2);
     let blob_path = store

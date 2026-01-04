@@ -1,6 +1,6 @@
 //! Checkpoint data structures
 
-use core::Blake3Hash;
+use core::Sha1Hash;
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
@@ -12,7 +12,7 @@ pub struct Checkpoint {
     /// Parent checkpoint ID
     pub parent: Option<Ulid>,
     /// Root tree hash for this checkpoint
-    pub root_tree: Blake3Hash,
+    pub root_tree: Sha1Hash,
     /// Timestamp (Unix milliseconds)
     pub ts_unix_ms: u64,
     /// Reason for checkpoint
@@ -65,7 +65,7 @@ impl Checkpoint {
     /// Create a new checkpoint
     pub fn new(
         parent: Option<Ulid>,
-        root_tree: Blake3Hash,
+        root_tree: Sha1Hash,
         reason: CheckpointReason,
         touched_paths: Vec<std::path::PathBuf>,
         meta: CheckpointMeta,
@@ -106,7 +106,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn create_test_checkpoint() -> Checkpoint {
-        let root_tree = Blake3Hash::from_bytes([1u8; 32]);
+        let root_tree = Sha1Hash::from_bytes([1u8; 20]);
         let meta = CheckpointMeta {
             files_changed: 5,
             bytes_added: 1024,
@@ -167,7 +167,7 @@ mod tests {
     #[test]
     fn test_checkpoint_with_parent() {
         let parent_id = Ulid::new();
-        let root_tree = Blake3Hash::from_bytes([2u8; 32]);
+        let root_tree = Sha1Hash::from_bytes([2u8; 20]);
         let meta = CheckpointMeta {
             files_changed: 1,
             bytes_added: 100,
@@ -196,7 +196,7 @@ mod tests {
         ];
 
         for reason in reasons {
-            let root_tree = Blake3Hash::from_bytes([3u8; 32]);
+            let root_tree = Sha1Hash::from_bytes([3u8; 20]);
             let meta = CheckpointMeta {
                 files_changed: 0,
                 bytes_added: 0,
@@ -220,7 +220,7 @@ mod tests {
             PathBuf::from("tests/test.rs"),
         ];
 
-        let root_tree = Blake3Hash::from_bytes([4u8; 32]);
+        let root_tree = Sha1Hash::from_bytes([4u8; 20]);
         let meta = CheckpointMeta {
             files_changed: 3,
             bytes_added: 500,
