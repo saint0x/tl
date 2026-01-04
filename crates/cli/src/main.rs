@@ -27,7 +27,11 @@ enum Commands {
     /// Show detailed repository information
     Info,
     /// Show checkpoint timeline
-    Log,
+    Log {
+        /// Number of checkpoints to show (default: 20)
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     /// Show diff between checkpoints
     Diff {
         /// First checkpoint ID
@@ -87,7 +91,7 @@ async fn main() -> Result<()> {
         Commands::Init => cmd::init::run().await,
         Commands::Status => cmd::status::run().await,
         Commands::Info => cmd::info::run().await,
-        Commands::Log => cmd::log::run().await,
+        Commands::Log { limit } => cmd::log::run(limit).await,
         Commands::Diff { checkpoint_a, checkpoint_b } => {
             cmd::diff::run(&checkpoint_a, &checkpoint_b).await
         }
