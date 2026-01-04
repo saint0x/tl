@@ -25,8 +25,12 @@ serde = { workspace = true }
 bincode = { workspace = true }
 
 # Utilities
+uuid = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 
 # Compression
 zstd = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.8"
