@@ -1,5 +1,6 @@
 //! Initialize Timelapse and underlying VCS layers
 
+use crate::locks::InitLock;
 use anyhow::{Context, Result};
 use journal::{Checkpoint, CheckpointMeta, CheckpointReason, Journal};
 use owo_colors::OwoColorize;
@@ -15,12 +16,17 @@ pub async fn run(skip_git: bool, skip_jj: bool) -> Result<()> {
     println!("{}", "Initializing Timelapse...".bold());
     println!();
 
+    // Phase 0: Acquire init lock to prevent concurrent initializations
+    // CRITICAL: This prevents race conditions when multiple processes try to init
+    let _init_lock = InitLock::acquire(&current_dir)
+        .context("Failed to acquire init lock - is another init in progress?")?;
+
     // Phase 1: State Detection
     let git_exists = crate::util::detect_git_repo(&current_dir)?;
     let jj_exists = jj::detect_jj_workspace(&current_dir)?.is_some();
     let tl_exists = current_dir.join(".tl").exists();
 
-    // Handle .tl already exists case
+    // Handle .tl already exists case (re-check after acquiring lock)
     if tl_exists {
         println!("{}", "Error: Timelapse already initialized".red());
         println!("Location: {}/.tl/", current_dir.display());
@@ -67,8 +73,9 @@ pub async fn run(skip_git: bool, skip_jj: bool) -> Result<()> {
     }
 
     // Phase 4.5: Create initial checkpoint of existing files BEFORE daemon starts
-    // This ensures existing files are captured as checkpoint #1
+    // CRITICAL: This ensures existing files are captured as checkpoint #1
     // Must happen before daemon starts because daemon locks the journal
+    // CRITICAL: This is now FATAL - if it fails, we clean up and exit
     println!();
     println!("{} Creating initial checkpoint...", "→".cyan());
     match create_initial_checkpoint(&current_dir) {
@@ -80,8 +87,22 @@ pub async fn run(skip_git: bool, skip_jj: bool) -> Result<()> {
             println!("  {} No files to checkpoint (empty directory)", "→".dimmed());
         }
         Err(e) => {
-            println!("  {} Warning: Could not create initial checkpoint: {}", "!".yellow(), e);
-            // Non-fatal - user can still use tl, but existing files won't be in first checkpoint
+            // CRITICAL: Initial checkpoint failure is now FATAL
+            // Without this, users think files are tracked when they aren't
+            println!("  {} Failed to create initial checkpoint: {}", "✗".red(), e);
+            println!();
+            println!("{}", "Cleaning up incomplete initialization...".red());
+
+            // Clean up the .tl directory we just created
+            let tl_dir = current_dir.join(".tl");
+            if tl_dir.exists() {
+                if let Err(cleanup_err) = std::fs::remove_dir_all(&tl_dir) {
+                    println!("  {} Warning: Could not clean up .tl directory: {}", "!".yellow(), cleanup_err);
+                    println!("  {} Please remove .tl/ manually before retrying", "→".dimmed());
+                }
+            }
+
+            anyhow::bail!("Failed to capture existing files. Please check disk space and file permissions, then try again.");
         }
     }
 

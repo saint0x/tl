@@ -474,9 +474,8 @@ async fn reapply_stash(
         reapplied += 1;
     }
 
-    // Remove the stash
-    stash_manager.pop()?;
-
+    // Print success messages BEFORE removing stash
+    // This ensures if anything fails, the stash is preserved for retry
     println!("{} Re-applied {} files from stash", "✓".green(), reapplied.to_string().green());
 
     if !conflicts.is_empty() {
@@ -489,6 +488,11 @@ async fn reapply_stash(
             println!("  ... and {} more", conflicts.len() - 5);
         }
     }
+
+    // Remove the stash ONLY after all operations complete successfully
+    // CRITICAL: This must be the last operation to prevent data loss
+    // If pop() fails, stash is preserved and user can retry
+    stash_manager.pop()?;
 
     Ok(())
 }

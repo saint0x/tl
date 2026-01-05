@@ -172,6 +172,194 @@ fn current_timestamp_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// Restore operation lock - prevents daemon checkpoints during restore
+///
+/// CRITICAL: This lock prevents race conditions between restore operations
+/// and daemon checkpointing. Without this, the daemon could:
+/// 1. Create a checkpoint with partially restored files
+/// 2. Update pathmap with incorrect state
+pub struct RestoreLock {
+    path: PathBuf,
+    #[allow(dead_code)]
+    file: File,
+}
+
+impl RestoreLock {
+    /// Acquire restore lock (non-blocking, fails if already held)
+    pub fn acquire(tl_dir: &Path) -> Result<Self> {
+        let lock_path = tl_dir.join("locks/restore.lock");
+
+        // Ensure locks directory exists
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent)
+                .context("Failed to create locks directory")?;
+        }
+
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .context("Failed to open restore lock file")?;
+
+        // Try to acquire exclusive lock (non-blocking)
+        if !try_flock_exclusive(&file)? {
+            anyhow::bail!("Another restore operation is in progress");
+        }
+
+        // Write timestamp for debugging
+        let mut file = file;
+        file.set_len(0)?;
+        file.seek(SeekFrom::Start(0))?;
+        write!(file, "{}", current_timestamp_ms())?;
+        file.sync_all()?;
+
+        Ok(Self {
+            path: lock_path,
+            file,
+        })
+    }
+
+    /// Check if restore lock is currently held (for daemon to check)
+    pub fn is_held(tl_dir: &Path) -> bool {
+        let lock_path = tl_dir.join("locks/restore.lock");
+        if !lock_path.exists() {
+            return false;
+        }
+
+        // Try to acquire the lock - if we can, it's not held
+        match OpenOptions::new().read(true).write(true).open(&lock_path) {
+            Ok(file) => {
+                match try_flock_exclusive(&file) {
+                    Ok(acquired) => {
+                        // If we acquired it, release immediately and return false
+                        // If we couldn't acquire, it's held
+                        !acquired
+                    }
+                    Err(_) => true, // Assume held on error
+                }
+            }
+            Err(_) => true, // Assume held if we can't open
+        }
+    }
+}
+
+impl Drop for RestoreLock {
+    fn drop(&mut self) {
+        // Remove lock file on drop
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// GC operation lock - ensures exclusive access during garbage collection
+///
+/// CRITICAL: GC must have exclusive access to prevent:
+/// 1. Other operations accessing objects being deleted
+/// 2. New objects being created that reference deleted objects
+pub struct GcLock {
+    path: PathBuf,
+    #[allow(dead_code)]
+    file: File,
+}
+
+impl GcLock {
+    /// Acquire GC lock (non-blocking, fails if already held)
+    pub fn acquire(tl_dir: &Path) -> Result<Self> {
+        let lock_path = tl_dir.join("locks/gc.lock");
+
+        // Ensure locks directory exists
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent)
+                .context("Failed to create locks directory")?;
+        }
+
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .context("Failed to open GC lock file")?;
+
+        // Try to acquire exclusive lock (non-blocking)
+        if !try_flock_exclusive(&file)? {
+            anyhow::bail!("Another GC operation is in progress");
+        }
+
+        // Write timestamp for debugging
+        let mut file = file;
+        file.set_len(0)?;
+        file.seek(SeekFrom::Start(0))?;
+        write!(file, "{}", current_timestamp_ms())?;
+        file.sync_all()?;
+
+        Ok(Self {
+            path: lock_path,
+            file,
+        })
+    }
+
+    /// Check if GC lock is currently held
+    pub fn is_held(tl_dir: &Path) -> bool {
+        let lock_path = tl_dir.join("locks/gc.lock");
+        if !lock_path.exists() {
+            return false;
+        }
+
+        match OpenOptions::new().read(true).write(true).open(&lock_path) {
+            Ok(file) => {
+                match try_flock_exclusive(&file) {
+                    Ok(acquired) => !acquired,
+                    Err(_) => true,
+                }
+            }
+            Err(_) => true,
+        }
+    }
+}
+
+impl Drop for GcLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Init operation lock - prevents concurrent init operations
+pub struct InitLock {
+    path: PathBuf,
+    #[allow(dead_code)]
+    file: File,
+}
+
+impl InitLock {
+    /// Acquire init lock at repo root level
+    pub fn acquire(repo_root: &Path) -> Result<Self> {
+        let lock_path = repo_root.join(".tl-init.lock");
+
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .context("Failed to open init lock file")?;
+
+        // Try to acquire exclusive lock (non-blocking)
+        if !try_flock_exclusive(&file)? {
+            anyhow::bail!("Another init operation is in progress");
+        }
+
+        Ok(Self {
+            path: lock_path,
+            file,
+        })
+    }
+}
+
+impl Drop for InitLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

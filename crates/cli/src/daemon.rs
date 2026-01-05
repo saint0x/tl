@@ -1,7 +1,7 @@
 //! Daemon lifecycle management
 
 use crate::ipc::{handle_connection, DaemonStatus, IpcRequest, IpcResponse, IpcServer};
-use crate::locks::DaemonLock;
+use crate::locks::{DaemonLock, RestoreLock};
 use crate::util;
 use anyhow::{Context, Result};
 use tl_core::store::Store;
@@ -132,6 +132,13 @@ impl Daemon {
 
                 // Periodic checkpoint creation
                 _ = tokio::time::sleep_until(tokio::time::Instant::from_std(last_checkpoint + checkpoint_interval)), if !pending_paths.is_empty() => {
+                    // CRITICAL: Check if a restore operation is in progress
+                    // If so, skip this checkpoint cycle to prevent race conditions
+                    if RestoreLock::is_held(&self.store.tl_dir()) {
+                        tracing::info!("Skipping checkpoint - restore operation in progress");
+                        continue;
+                    }
+
                     tracing::info!("Creating checkpoint for {} paths", pending_paths.len());
 
                     match self.create_checkpoint(&pending_paths).await {
@@ -155,6 +162,13 @@ impl Daemon {
                 // Handle flush checkpoint requests from IPC
                 Some(response_tx) = self.flush_rx.recv() => {
                     tracing::info!("Received flush checkpoint request");
+
+                    // Check for restore lock before flushing
+                    if RestoreLock::is_held(&self.store.tl_dir()) {
+                        tracing::warn!("Flush skipped - restore operation in progress");
+                        let _ = response_tx.send(Ok(None));
+                        continue;
+                    }
 
                     let result = if !pending_paths.is_empty() {
                         match self.create_checkpoint(&pending_paths).await {

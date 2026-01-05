@@ -130,6 +130,12 @@ pub async fn run(
         &publish_options,
     )?;
 
+    // CRITICAL: Flush mapping to disk immediately after publish
+    // Without this, a crash could lose the checkpoint→JJ commit mappings,
+    // causing duplicate JJ commits on retry
+    mapping.flush()
+        .context("Failed to flush checkpoint mapping to disk")?;
+
     // 8. Create bookmark (auto-create tl/HEAD if not specified)
     let bookmark_name = bookmark.unwrap_or_else(|| "HEAD".to_string());
     let last_commit_id = commit_ids.last().unwrap();

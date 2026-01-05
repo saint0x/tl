@@ -3,6 +3,7 @@
 //! This module provides both the CLI command and reusable restore utilities
 //! for use by other commands (e.g., pull, stash).
 
+use crate::locks::RestoreLock;
 use crate::util;
 use anyhow::{anyhow, Context, Result};
 use tl_core::{Entry, Store, Tree};
@@ -19,7 +20,13 @@ pub async fn run(checkpoint: &str, skip_confirm: bool) -> Result<()> {
 
     let tl_dir = repo_root.join(".tl");
 
-    // 2. Ensure daemon running (auto-starts if needed)
+    // 2. Acquire restore lock to prevent daemon race conditions
+    // CRITICAL: This prevents the daemon from creating checkpoints during restore,
+    // which could corrupt the pathmap or capture partial state
+    let _restore_lock = RestoreLock::acquire(&tl_dir)
+        .context("Failed to acquire restore lock - is another restore in progress?")?;
+
+    // 3. Ensure daemon running (auto-starts if needed)
     crate::daemon::ensure_daemon_running().await?;
 
     // 3. Resolve checkpoint reference via unified data access layer
@@ -221,17 +228,35 @@ pub fn restore_tree(
 
     // Optionally delete extra files not in the tree
     if delete_extra {
-        if let Ok(deleted) = delete_extra_files(repo_root, &restored_paths) {
-            result.files_deleted = deleted;
+        let delete_result = delete_extra_files(repo_root, &restored_paths);
+        result.files_deleted = delete_result.deleted;
+
+        // Report deletion errors
+        for (path, err) in delete_result.errors {
+            result.errors.push(format!(
+                "Failed to delete {}: {}",
+                path.display(),
+                err
+            ));
         }
     }
 
     Ok(result)
 }
 
+/// Result of delete_extra_files operation
+#[derive(Debug, Default)]
+pub struct DeleteResult {
+    pub deleted: usize,
+    pub errors: Vec<(PathBuf, std::io::Error)>,
+}
+
 /// Delete files in working directory that aren't in the restored set
-fn delete_extra_files(repo_root: &Path, keep_paths: &std::collections::HashSet<PathBuf>) -> Result<usize> {
-    let mut deleted = 0;
+///
+/// CRITICAL: This function now reports all errors instead of silently ignoring them.
+/// Previously, deletion failures were silently swallowed with `.is_ok()`.
+fn delete_extra_files(repo_root: &Path, keep_paths: &std::collections::HashSet<PathBuf>) -> DeleteResult {
+    let mut result = DeleteResult::default();
 
     for entry in walkdir::WalkDir::new(repo_root)
         .into_iter()
@@ -254,12 +279,13 @@ fn delete_extra_files(repo_root: &Path, keep_paths: &std::collections::HashSet<P
         if entry.file_type().is_file() {
             let path = entry.path().to_path_buf();
             if !keep_paths.contains(&path) {
-                if fs::remove_file(&path).is_ok() {
-                    deleted += 1;
+                match fs::remove_file(&path) {
+                    Ok(()) => result.deleted += 1,
+                    Err(e) => result.errors.push((path, e)),
                 }
             }
         }
     }
 
-    Ok(deleted)
+    result
 }

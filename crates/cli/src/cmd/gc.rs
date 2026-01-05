@@ -1,5 +1,6 @@
 //! Run garbage collection
 
+use crate::locks::GcLock;
 use crate::util;
 use anyhow::{Context, Result};
 use std::collections::HashSet;
@@ -16,7 +17,12 @@ pub async fn run() -> Result<()> {
 
     let tl_dir = repo_root.join(".tl");
 
-    // 2. CRITICAL: Stop daemon before GC to avoid journal corruption
+    // 2. Acquire GC lock to prevent concurrent GC or other operations
+    // CRITICAL: This lock must be held throughout GC to prevent data races
+    let _gc_lock = GcLock::acquire(&tl_dir)
+        .context("Failed to acquire GC lock - is another GC or restore in progress?")?;
+
+    // 3. CRITICAL: Stop daemon before GC to avoid journal corruption
     println!("{}", "Stopping daemon for exclusive journal access...".dimmed());
 
     let socket_path = tl_dir.join("state/daemon.sock");

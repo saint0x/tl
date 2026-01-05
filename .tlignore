@@ -1,0 +1,13 @@
+# Timelapse Ignore Patterns
+# Built-in patterns already cover: .tl/, .git/, .jj/, editor temp files
+# Add project-specific patterns here
+
+# Build outputs (examples)
+# /build/
+# /dist/
+# *.log
+
+# Dependencies (if not already covered)
+# /vendor/
+
+# Project-specific

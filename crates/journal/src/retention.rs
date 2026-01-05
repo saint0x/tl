@@ -1,7 +1,7 @@
 //! Retention policies and garbage collection
 
 use anyhow::Result;
-use core::{Sha1Hash, Store};
+use core::{EntryKind, Sha1Hash, Store};
 use crate::Journal;
 use std::collections::HashSet;
 use std::fs;
@@ -363,6 +363,10 @@ impl GarbageCollector {
     }
 
     /// Mark live objects (trees and blobs) referenced by live checkpoints
+    ///
+    /// CRITICAL: This now recursively walks all subtrees to mark nested blobs.
+    /// Previously, only direct entries were marked, causing nested directory
+    /// blobs to be deleted by GC while still referenced.
     fn mark_live_objects(
         &self,
         live_checkpoints: &HashSet<Ulid>,
@@ -374,18 +378,60 @@ impl GarbageCollector {
 
         for cp_id in live_checkpoints {
             if let Some(checkpoint) = journal.get(cp_id)? {
-                // Mark root tree
-                live_trees.insert(checkpoint.root_tree);
-
-                // Walk tree and mark all blobs
-                let tree = store.read_tree(checkpoint.root_tree)?;
-                for entry in tree.entries() {
-                    live_blobs.insert(entry.blob_hash);
-                }
+                // Recursively walk the tree and mark all objects
+                Self::mark_tree_recursive(
+                    checkpoint.root_tree,
+                    &mut live_trees,
+                    &mut live_blobs,
+                    store,
+                )?;
             }
         }
 
         Ok((live_trees, live_blobs))
+    }
+
+    /// Recursively walk a tree and mark all referenced objects as live
+    ///
+    /// CRITICAL: This now verifies blob existence before marking as live.
+    /// Missing blobs are logged as warnings but don't halt GC.
+    fn mark_tree_recursive(
+        tree_hash: Sha1Hash,
+        live_trees: &mut HashSet<Sha1Hash>,
+        live_blobs: &mut HashSet<Sha1Hash>,
+        store: &Store,
+    ) -> Result<()> {
+        // Avoid re-processing trees we've already seen (handles potential cycles)
+        if !live_trees.insert(tree_hash) {
+            return Ok(());
+        }
+
+        let tree = store.read_tree(tree_hash)?;
+
+        for entry in tree.entries() {
+            match entry.kind {
+                EntryKind::Tree => {
+                    // Recurse into subtree - entry.blob_hash is actually a tree hash
+                    Self::mark_tree_recursive(entry.blob_hash, live_trees, live_blobs, store)?;
+                }
+                EntryKind::File | EntryKind::ExecutableFile | EntryKind::Symlink => {
+                    // CRITICAL: Verify blob exists before marking as live
+                    // This catches corrupted/missing blobs early
+                    if store.blob_store().has_blob(entry.blob_hash) {
+                        live_blobs.insert(entry.blob_hash);
+                    } else {
+                        // Log warning but don't fail - blob might have been legitimately deleted
+                        tracing::warn!(
+                            "Missing blob referenced by tree {}: {}",
+                            tree_hash.to_hex(),
+                            entry.blob_hash.to_hex()
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Sweep dead objects (delete unreferenced checkpoints, trees, blobs)

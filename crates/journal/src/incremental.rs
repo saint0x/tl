@@ -105,11 +105,20 @@ fn reconcile_path(
 
 /// Verify that a file is stable during read (double-stat verification)
 ///
-/// This prevents race conditions where a file is modified during read
+/// This prevents race conditions where a file is modified during read.
+/// CRITICAL: Now also checks inode to detect atomic file replacements
+/// (e.g., `mv newfile.tmp file.txt` where mtime might not change).
 fn verify_stable_read(path: &Path) -> Result<Vec<u8>> {
     // First stat
     let stat1 = std::fs::metadata(path)?;
     let mtime1 = stat1.modified()?;
+
+    // Get inode on Unix systems
+    #[cfg(unix)]
+    let ino1 = {
+        use std::os::unix::fs::MetadataExt;
+        stat1.ino()
+    };
 
     // Read file contents
     let data = std::fs::read(path)?;
@@ -118,12 +127,25 @@ fn verify_stable_read(path: &Path) -> Result<Vec<u8>> {
     let stat2 = std::fs::metadata(path)?;
     let mtime2 = stat2.modified()?;
 
-    // Verify file wasn't modified during read
+    // Verify mtime hasn't changed
     if mtime1 != mtime2 {
         return Err(anyhow::anyhow!(
             "File modified during read: {} (will be requeued)",
             path.display()
         ));
+    }
+
+    // Verify inode hasn't changed (catches atomic mv operations)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let ino2 = stat2.ino();
+        if ino1 != ino2 {
+            return Err(anyhow::anyhow!(
+                "File replaced during read (inode changed): {} (will be requeued)",
+                path.display()
+            ));
+        }
     }
 
     Ok(data)
