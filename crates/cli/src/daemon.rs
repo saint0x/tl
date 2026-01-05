@@ -355,6 +355,20 @@ impl Daemon {
                                     let mut results = Vec::new();
 
                                     for checkpoint_ref in refs {
+                                        // Handle HEAD alias
+                                        if checkpoint_ref == "HEAD" {
+                                            match journal.latest() {
+                                                Ok(Some(cp)) => {
+                                                    results.push(Some(cp));
+                                                    continue;
+                                                }
+                                                Ok(None) | Err(_) => {
+                                                    results.push(None);
+                                                    continue;
+                                                }
+                                            }
+                                        }
+
                                         // Try full ULID first
                                         if let Ok(ulid) = Ulid::from_string(&checkpoint_ref) {
                                             match journal.get(&ulid) {

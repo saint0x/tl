@@ -144,6 +144,16 @@ fn resolve_via_journal(
     let mut results = Vec::new();
 
     for checkpoint_ref in refs {
+        // Handle HEAD alias
+        if checkpoint_ref == "HEAD" {
+            if let Ok(Some(cp)) = journal.latest() {
+                results.push(Some(cp.id));
+                continue;
+            }
+            results.push(None);
+            continue;
+        }
+
         // Try full ULID first
         if let Ok(ulid) = Ulid::from_string(checkpoint_ref) {
             match journal.get(&ulid) {
@@ -251,4 +261,126 @@ fn calculate_dir_size(path: &Path) -> Result<u64> {
         }
     }
     Ok(total_size)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use journal::{CheckpointMeta, CheckpointReason};
+    use tempfile::TempDir;
+    use tl_core::Sha1Hash;
+
+    fn create_test_checkpoint(parent: Option<Ulid>) -> Checkpoint {
+        let root_tree = Sha1Hash::from_bytes([0u8; 20]);
+        let meta = CheckpointMeta {
+            files_changed: 1,
+            bytes_added: 100,
+            bytes_removed: 0,
+        };
+        Checkpoint::new(parent, root_tree, CheckpointReason::Manual, vec![], meta)
+    }
+
+    #[test]
+    fn test_head_alias_resolves_to_latest() {
+        let temp_dir = TempDir::new().unwrap();
+        let tl_dir = temp_dir.path().to_path_buf();
+        let journal_path = tl_dir.join("journal");
+        std::fs::create_dir_all(&journal_path).unwrap();
+
+        // Create checkpoints and store IDs before dropping journal
+        let cp3_id;
+        {
+            let journal = Journal::open(&journal_path).unwrap();
+
+            // Create 3 checkpoints
+            let cp1 = create_test_checkpoint(None);
+            let cp2 = create_test_checkpoint(Some(cp1.id));
+            let cp3 = create_test_checkpoint(Some(cp2.id));
+            cp3_id = cp3.id;
+
+            journal.append(&cp1).unwrap();
+            journal.append(&cp2).unwrap();
+            journal.append(&cp3).unwrap();
+        } // journal lock released here
+
+        // Test HEAD resolves to latest (cp3)
+        let results = resolve_via_journal(&["HEAD".to_string()], &tl_dir).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], Some(cp3_id), "HEAD should resolve to latest checkpoint");
+    }
+
+    #[test]
+    fn test_head_alias_empty_journal() {
+        let temp_dir = TempDir::new().unwrap();
+        let tl_dir = temp_dir.path().to_path_buf();
+        let journal_path = tl_dir.join("journal");
+        std::fs::create_dir_all(&journal_path).unwrap();
+
+        {
+            let _journal = Journal::open(&journal_path).unwrap();
+        } // journal lock released here
+
+        // Test HEAD on empty journal returns None
+        let results = resolve_via_journal(&["HEAD".to_string()], &tl_dir).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], None, "HEAD should return None for empty journal");
+    }
+
+    #[test]
+    fn test_head_case_sensitive() {
+        let temp_dir = TempDir::new().unwrap();
+        let tl_dir = temp_dir.path().to_path_buf();
+        let journal_path = tl_dir.join("journal");
+        std::fs::create_dir_all(&journal_path).unwrap();
+
+        let cp1_id;
+        {
+            let journal = Journal::open(&journal_path).unwrap();
+
+            let cp1 = create_test_checkpoint(None);
+            cp1_id = cp1.id;
+            journal.append(&cp1).unwrap();
+        } // journal lock released here
+
+        // Test that only uppercase HEAD works (lowercase should not match)
+        let results = resolve_via_journal(&["HEAD".to_string()], &tl_dir).unwrap();
+        assert_eq!(results[0], Some(cp1_id), "HEAD should work");
+
+        // lowercase "head" should not resolve (it's not a valid ULID or pin)
+        let results = resolve_via_journal(&["head".to_string()], &tl_dir).unwrap();
+        assert_eq!(results[0], None, "lowercase 'head' should not resolve");
+    }
+
+    #[test]
+    fn test_mixed_refs_with_head() {
+        let temp_dir = TempDir::new().unwrap();
+        let tl_dir = temp_dir.path().to_path_buf();
+        let journal_path = tl_dir.join("journal");
+        std::fs::create_dir_all(&journal_path).unwrap();
+
+        let (cp1_id, cp2_id);
+        {
+            let journal = Journal::open(&journal_path).unwrap();
+
+            let cp1 = create_test_checkpoint(None);
+            let cp2 = create_test_checkpoint(Some(cp1.id));
+            cp1_id = cp1.id;
+            cp2_id = cp2.id;
+            journal.append(&cp1).unwrap();
+            journal.append(&cp2).unwrap();
+        } // journal lock released here
+
+        // Test resolving multiple refs including HEAD
+        let refs = vec![
+            "HEAD".to_string(),
+            cp1_id.to_string(),
+            "nonexistent".to_string(),
+        ];
+        let results = resolve_via_journal(&refs, &tl_dir).unwrap();
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0], Some(cp2_id), "HEAD should resolve to latest (cp2)");
+        assert_eq!(results[1], Some(cp1_id), "Full ULID should resolve");
+        assert_eq!(results[2], None, "nonexistent should return None");
+    }
 }

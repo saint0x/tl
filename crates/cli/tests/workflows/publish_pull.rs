@@ -75,8 +75,57 @@ async fn test_publish_single_checkpoint() -> Result<()> {
         "Should confirm publication"
     );
 
+    // Verify auto-bookmark snap/HEAD is created when no explicit bookmark provided
+    assert!(
+        publish_result.stdout.contains("snap/HEAD") || publish_result.stdout.contains("Updated bookmark"),
+        "Should auto-create snap/HEAD bookmark"
+    );
+
     // Performance assertion
     assert!(publish_duration < Duration::from_secs(10), "Publish too slow: {:?}", publish_duration);
+
+    Ok(())
+}
+
+/// Test publish HEAD alias (Bug fix: HEAD should resolve to latest checkpoint)
+#[tokio::test]
+async fn test_publish_head_alias() -> Result<()> {
+    let mut project = TestProject::new(
+        ProjectTemplate::rust_project(ProjectSize::Tiny)
+    )?;
+    let root = project.root().to_path_buf();
+
+    TlCommand::new(&root).args(&["init"]).assert_success()?;
+    init_jj_workspace(&root)?;
+
+    TlCommand::new(&root).args(&["start"]).assert_success()?;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Create checkpoint
+    project.modify_files(&["src/main.rs"], "// HEAD test version")?;
+    let _checkpoint = create_checkpoint(&root).await?
+        .expect("Should create checkpoint");
+
+    TlCommand::new(&root).args(&["stop"]).assert_success()?;
+
+    // Publish using HEAD alias (this was failing before the fix)
+    let publish_result = TlCommand::new(&root)
+        .args(&["publish", "HEAD"])
+        .assert_success()?;
+
+    println!("✓ Publish HEAD alias works");
+    println!("{}", publish_result.stdout);
+
+    assert!(
+        publish_result.stdout.contains("Published") || publish_result.stdout.contains("✓"),
+        "Should confirm publication using HEAD"
+    );
+
+    // Verify auto-bookmark snap/HEAD is created
+    assert!(
+        publish_result.stdout.contains("snap/HEAD"),
+        "Should auto-create snap/HEAD bookmark when publishing HEAD"
+    );
 
     Ok(())
 }

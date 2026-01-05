@@ -6,6 +6,10 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lib]
+name = "cli_lib"
+path = "src/lib.rs"
+
 [[bin]]
 name = "tl"
 path = "src/main.rs"
