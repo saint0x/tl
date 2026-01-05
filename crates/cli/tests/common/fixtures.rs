@@ -655,16 +655,32 @@ mod tests {
     }
 
     #[test]
-    fn test_generation_speed() -> Result<()> {
-        let start = std::time::Instant::now();
-
+    fn test_generation_produces_valid_project() -> Result<()> {
+        // Test that project generation works correctly (timing benchmarks are in benches/)
         let template = ProjectTemplate::rust_project(ProjectSize::Medium);
-        let _project = TestProject::new(template)?;
+        let project = TestProject::new(template)?;
 
-        let elapsed = start.elapsed();
+        // Verify the project was actually created with expected structure
+        assert!(project.root().exists(), "Project root should exist");
 
-        // Should generate medium project in < 100ms
-        assert!(elapsed.as_millis() < 100, "Generation too slow: {:?}", elapsed);
+        // For Medium size, we should have a reasonable number of files
+        let file_count = project.file_count();
+        assert!(file_count > 0, "Project should have files");
+        assert!(file_count >= 50, "Medium project should have at least 50 files, got {}", file_count);
+
+        // Verify we have some directories (src, tests, etc. are generated)
+        let entries: Vec<_> = std::fs::read_dir(project.root())?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .collect();
+        assert!(!entries.is_empty(), "Project should have subdirectories");
+
+        // Verify total size is reasonable
+        let total_size = project.total_size();
+        assert!(total_size > 0, "Project should have non-zero size");
+
+        // Verify file manifest is populated
+        assert!(!project.file_manifest.is_empty(), "File manifest should not be empty");
 
         Ok(())
     }

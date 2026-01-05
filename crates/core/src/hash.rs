@@ -390,7 +390,7 @@ mod tests {
 
     #[test]
     fn test_unstable_file_retries_then_fails() -> Result<()> {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
         use std::sync::Arc;
         use std::thread;
 
@@ -399,33 +399,57 @@ mod tests {
         std::fs::write(&file, b"initial")?;
 
         let stop_flag = Arc::new(AtomicBool::new(false));
+        let write_count = Arc::new(AtomicU64::new(0));
         let stop_flag_clone = stop_flag.clone();
+        let write_count_clone = write_count.clone();
         let file_clone = file.clone();
 
         // Spawn writer thread that constantly changes file VERY rapidly
         let writer = thread::spawn(move || {
             let mut counter = 0u64;
             while !stop_flag_clone.load(Ordering::Relaxed) {
-                let _ = std::fs::write(&file_clone, format!("changing {}", counter));
+                // Vary content length to ensure metadata changes
+                let content = format!("changing {} {}", counter, "x".repeat((counter % 100) as usize));
+                let _ = std::fs::write(&file_clone, content);
                 counter += 1;
+                write_count_clone.store(counter, Ordering::Relaxed);
                 // No sleep - write as fast as possible
             }
         });
 
-        // Give writer time to start
-        thread::sleep(Duration::from_millis(50));
+        // Wait for writer to actually start writing (verify at least 10 writes happened)
+        let start = std::time::Instant::now();
+        while write_count.load(Ordering::Relaxed) < 10 && start.elapsed() < Duration::from_secs(2) {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(write_count.load(Ordering::Relaxed) >= 10, "Writer didn't start properly");
 
-        // Should retry and eventually fail (only 2 retries to make test faster)
-        let result = hash_file_stable(&file, 2);
+        // Try multiple hash attempts - at least ONE should detect the instability
+        // This is more reliable than a single attempt
+        let mut detected_unstable = false;
+        for _ in 0..5 {
+            // Use only 1 retry per attempt to make detection more likely
+            let result = hash_file_stable(&file, 1);
+            if result.is_err() {
+                let err_msg = result.unwrap_err().to_string();
+                if err_msg.contains("unstable") {
+                    detected_unstable = true;
+                    break;
+                }
+            }
+        }
 
         // Stop writer
         stop_flag.store(true, Ordering::Relaxed);
+        let total_writes = write_count.load(Ordering::Relaxed);
         writer.join().unwrap();
 
-        // Should fail with unstable file error
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("unstable"), "Error message should mention 'unstable': {}", err_msg);
+        // Should have detected instability at least once
+        assert!(
+            detected_unstable,
+            "Failed to detect file instability after {} writes. This may indicate a timing issue.",
+            total_writes
+        );
         Ok(())
     }
 

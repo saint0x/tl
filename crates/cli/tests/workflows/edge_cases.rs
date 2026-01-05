@@ -10,7 +10,8 @@ use crate::common::cli::TlCommand;
 
 /// Trigger checkpoint creation and return the checkpoint ID
 async fn create_checkpoint(root: &std::path::Path) -> Result<Option<String>> {
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Wait for FSEvents latency + coalescing window (macOS can have 100-300ms FSEvents delay)
+    tokio::time::sleep(Duration::from_millis(1000)).await;
 
     let flush_result = TlCommand::new(root)
         .args(&["flush"])
@@ -35,7 +36,16 @@ async fn test_flush_no_changes() -> Result<()> {
     TlCommand::new(&root).args(&["start"]).assert_success()?;
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    // Flush with no changes - should return "No pending changes"
+    // First flush creates initial checkpoint (initial files are "new" from daemon perspective)
+    let first_flush = TlCommand::new(&root)
+        .args(&["flush"])
+        .execute()?;
+    println!("First flush (establishing baseline): {}", first_flush.stdout);
+
+    // Wait for any pending events to settle
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Second flush with no changes should return "No pending changes"
     let flush_result = TlCommand::new(&root)
         .args(&["flush"])
         .assert_success()?;

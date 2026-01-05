@@ -369,6 +369,32 @@ impl Daemon {
                                             }
                                         }
 
+                                        // Handle HEAD~N syntax (N checkpoints before HEAD)
+                                        if checkpoint_ref.starts_with("HEAD~") {
+                                            if let Some(n_str) = checkpoint_ref.strip_prefix("HEAD~") {
+                                                if let Ok(n) = n_str.parse::<usize>() {
+                                                    // Walk back N checkpoints from HEAD
+                                                    let mut current = journal.latest().ok().flatten();
+                                                    for _ in 0..n {
+                                                        if let Some(cp) = &current {
+                                                            if let Some(parent_id) = cp.parent {
+                                                                current = journal.get(&parent_id).ok().flatten();
+                                                            } else {
+                                                                current = None;
+                                                                break;
+                                                            }
+                                                        } else {
+                                                            break;
+                                                        }
+                                                    }
+                                                    results.push(current);
+                                                    continue;
+                                                }
+                                            }
+                                            results.push(None); // Invalid HEAD~N format
+                                            continue;
+                                        }
+
                                         // Try full ULID first
                                         if let Ok(ulid) = Ulid::from_string(&checkpoint_ref) {
                                             match journal.get(&ulid) {
