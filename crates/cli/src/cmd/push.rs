@@ -39,6 +39,13 @@ pub async fn run(
     // Execute native git push (now returns detailed results)
     let results = jj::git_ops::native_git_push(&mut workspace, bookmark_ref, all, force)?;
 
+    // Show auto-detected bookmark if neither --all nor -b was specified
+    if bookmark.is_none() && !all && !results.is_empty() {
+        if let Some(first_result) = results.first() {
+            println!("{}", format!("Using bookmark: {}", first_result.name).dimmed());
+        }
+    }
+
     // 4. Display results
     let pushed_count = results.iter()
         .filter(|r| r.status == BranchPushStatus::Pushed)

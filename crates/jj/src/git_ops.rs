@@ -132,7 +132,45 @@ pub fn native_git_push(
             anyhow::bail!("Branch {} not found or not at a single commit", full_name);
         }
     } else {
-        anyhow::bail!("Must specify either --all or a bookmark name");
+        // Auto-detect: find tl/HEAD or first tl/* bookmark (like `git push` auto-detects current branch)
+        let mut auto_bookmark: Option<String> = None;
+
+        // Priority 1: tl/HEAD (default publish target)
+        let head_ref: &RefName = "tl/HEAD".as_ref();
+        if view.get_local_bookmark(head_ref).is_present() {
+            auto_bookmark = Some("tl/HEAD".to_string());
+        } else {
+            // Priority 2: First available tl/* bookmark
+            for (bookmark_name, target) in view.local_bookmarks() {
+                if bookmark_name.as_str().starts_with("tl/") && target.as_normal().is_some() {
+                    auto_bookmark = Some(bookmark_name.as_str().to_string());
+                    break;
+                }
+            }
+        }
+
+        match auto_bookmark {
+            Some(name) => {
+                // Found bookmark - collect it for push
+                let ref_name: &RefName = name.as_ref();
+                let target = view.get_local_bookmark(ref_name);
+                if let Some(local_commit_id) = target.as_normal() {
+                    let remote_symbol = ref_name.to_remote_symbol(origin_remote);
+                    let remote_ref = view.get_remote_bookmark(remote_symbol);
+                    let remote_commit_id = remote_ref.target.as_normal().map(|id| id.hex());
+                    branches_to_push.push((
+                        name,
+                        Some(local_commit_id.hex()),
+                        remote_commit_id,
+                    ));
+                }
+            }
+            None => {
+                anyhow::bail!(
+                    "No bookmark to push. Run 'tl publish' first, or specify --all or -b <name>"
+                );
+            }
+        }
     }
 
     if branches_to_push.is_empty() {
