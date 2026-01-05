@@ -1,10 +1,13 @@
 //! Initialize Timelapse and underlying VCS layers
 
 use anyhow::{Context, Result};
+use journal::{Checkpoint, CheckpointMeta, CheckpointReason, Journal};
 use owo_colors::OwoColorize;
 use std::env;
 use std::path::Path;
 use tl_core::store::{Store, update_vcs_config, update_user_config};
+use tl_core::{Entry, Tree};
+use watcher::ignore::{IgnoreConfig, IgnoreRules};
 
 pub async fn run(skip_git: bool, skip_jj: bool) -> Result<()> {
     let current_dir = env::current_dir()?;
@@ -63,8 +66,26 @@ pub async fn run(skip_git: bool, skip_jj: bool) -> Result<()> {
             .context("Failed to create .tlignore")?;
     }
 
-    // Phase 4.5: Auto-start daemon
+    // Phase 4.5: Create initial checkpoint of existing files BEFORE daemon starts
+    // This ensures existing files are captured as checkpoint #1
+    // Must happen before daemon starts because daemon locks the journal
     println!();
+    println!("{} Creating initial checkpoint...", "→".cyan());
+    match create_initial_checkpoint(&current_dir) {
+        Ok(Some(cp_id)) => {
+            let short_id = &cp_id[..8.min(cp_id.len())];
+            println!("  {} Initial checkpoint: {}", "✓".green(), short_id.bright_cyan());
+        }
+        Ok(None) => {
+            println!("  {} No files to checkpoint (empty directory)", "→".dimmed());
+        }
+        Err(e) => {
+            println!("  {} Warning: Could not create initial checkpoint: {}", "!".yellow(), e);
+            // Non-fatal - user can still use tl, but existing files won't be in first checkpoint
+        }
+    }
+
+    // Phase 4.6: Auto-start daemon (after initial checkpoint so it can watch for future changes)
     println!("{} Starting daemon...", "→".cyan());
     match crate::daemon::ensure_daemon_running().await {
         Ok(()) => {
@@ -323,4 +344,127 @@ fn create_seed_commit_background(repo_root: &Path) {
             );
         }
     }
+}
+
+/// Create initial checkpoint capturing all existing files in the repository
+///
+/// This is called during `tl init` to ensure that files existing before init
+/// are captured in the first checkpoint. Without this, only files that change
+/// AFTER init would be tracked (Bug: existing files not captured).
+///
+/// Returns:
+/// - Ok(Some(checkpoint_id)) if files were found and checkpointed
+/// - Ok(None) if directory is empty (no files to checkpoint)
+/// - Err if checkpoint creation failed
+fn create_initial_checkpoint(repo_root: &Path) -> Result<Option<String>> {
+    let tl_dir = repo_root.join(".tl");
+
+    // Open store and journal
+    let store = Store::open(repo_root)
+        .context("Failed to open store for initial checkpoint")?;
+    let journal = Journal::open(&tl_dir.join("journal"))
+        .context("Failed to open journal for initial checkpoint")?;
+
+    // Load ignore rules to respect .gitignore and .tlignore
+    let ignore_config = IgnoreConfig::default();
+    let ignore_rules = IgnoreRules::load(repo_root, ignore_config)
+        .context("Failed to load ignore rules")?;
+
+    // Build tree from all files in working directory
+    let mut tree = Tree::new();
+    let mut files_count = 0u32;
+    let mut touched_paths = Vec::new();
+
+    for entry in walkdir::WalkDir::new(repo_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| {
+            // Skip the root directory itself from filtering
+            if e.path() == repo_root {
+                return true;
+            }
+            // Use ignore rules to filter
+            let rel_path = e.path().strip_prefix(repo_root).unwrap_or(e.path());
+            !ignore_rules.should_ignore(rel_path)
+        })
+    {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        // Skip directories (we only store files)
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let path = entry.path();
+        let rel_path = match path.strip_prefix(repo_root) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        // Skip protected directories (double-check)
+        let rel_str = rel_path.to_string_lossy();
+        if rel_str.starts_with(".tl/") || rel_str.starts_with(".git/") || rel_str.starts_with(".jj/") {
+            continue;
+        }
+
+        // Hash file content
+        let blob_hash = tl_core::hash::hash_file(path)
+            .with_context(|| format!("Failed to hash file: {}", path.display()))?;
+
+        // Store blob if not already present
+        if !store.blob_store().has_blob(blob_hash) {
+            let content = std::fs::read(path)
+                .with_context(|| format!("Failed to read file: {}", path.display()))?;
+            store.blob_store().write_blob(blob_hash, &content)
+                .with_context(|| format!("Failed to store blob for: {}", path.display()))?;
+        }
+
+        // Get file mode
+        #[cfg(unix)]
+        let mode = {
+            use std::os::unix::fs::MetadataExt;
+            entry.metadata()
+                .map(|m| m.mode())
+                .unwrap_or(0o644)
+        };
+        #[cfg(not(unix))]
+        let mode = 0o644;
+
+        // Add to tree
+        tree.insert(rel_path, Entry::file(mode, blob_hash));
+        touched_paths.push(rel_path.to_path_buf());
+        files_count += 1;
+    }
+
+    // If no files found, return None
+    if files_count == 0 {
+        return Ok(None);
+    }
+
+    // Compute and store tree
+    let tree_hash = tree.hash();
+    store.write_tree(&tree)
+        .context("Failed to write tree for initial checkpoint")?;
+
+    // Create checkpoint (no parent since this is the first)
+    let checkpoint = Checkpoint::new(
+        None, // No parent - this is the first checkpoint
+        tree_hash,
+        CheckpointReason::Manual, // Treat initial snapshot as manual
+        touched_paths,
+        CheckpointMeta {
+            files_changed: files_count,
+            bytes_added: 0,    // Could calculate, but not critical
+            bytes_removed: 0,
+        },
+    );
+
+    // Append to journal
+    journal.append(&checkpoint)
+        .context("Failed to append initial checkpoint to journal")?;
+
+    Ok(Some(checkpoint.id.to_string()))
 }

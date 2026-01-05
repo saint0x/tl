@@ -527,11 +527,16 @@ mod tests {
         let temp = TempDir::new()?;
         std::fs::create_dir(temp.path().join(".git"))?;
 
-        // Test with no config
-        let result = parse_git_user_config(temp.path())?;
-        assert!(result.is_none(), "Should return None when config doesn't exist");
+        // Isolate test from real global git config by setting HOME to temp dir
+        // This prevents the test from finding ~/.gitconfig
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", temp.path());
 
-        // Test with valid config
+        // Test with no config (and no global config due to HOME override)
+        let result = parse_git_user_config(temp.path())?;
+        assert!(result.is_none(), "Should return None when no config exists (local or global)");
+
+        // Test with valid local config
         let config = r#"
 [core]
     repositoryformatversion = 0
@@ -549,10 +554,10 @@ mod tests {
         assert_eq!(
             result,
             Some(("John Doe".to_string(), "john@example.com".to_string())),
-            "Should parse user name and email"
+            "Should parse user name and email from local config"
         );
 
-        // Test with missing email
+        // Test with missing email (no global fallback)
         let config_no_email = r#"
 [user]
     name = Jane Doe
@@ -560,7 +565,45 @@ mod tests {
         std::fs::write(temp.path().join(".git/config"), config_no_email)?;
 
         let result = parse_git_user_config(temp.path())?;
-        assert!(result.is_none(), "Should return None when email is missing");
+        assert!(result.is_none(), "Should return None when email is missing and no global config");
+
+        // Test global config fallback: create a global .gitconfig
+        let global_config = r#"
+[user]
+    name = Global User
+    email = global@example.com
+"#;
+        std::fs::write(temp.path().join(".gitconfig"), global_config)?;
+
+        // Clear local config
+        std::fs::write(temp.path().join(".git/config"), "[core]\n")?;
+
+        let result = parse_git_user_config(temp.path())?;
+        assert_eq!(
+            result,
+            Some(("Global User".to_string(), "global@example.com".to_string())),
+            "Should fall back to global config when local config has no user section"
+        );
+
+        // Test local override of global: local should take precedence
+        let local_override = r#"
+[user]
+    name = Local Override
+    email = local@example.com
+"#;
+        std::fs::write(temp.path().join(".git/config"), local_override)?;
+
+        let result = parse_git_user_config(temp.path())?;
+        assert_eq!(
+            result,
+            Some(("Local Override".to_string(), "local@example.com".to_string())),
+            "Local config should override global config"
+        );
+
+        // Restore original HOME
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        }
 
         Ok(())
     }

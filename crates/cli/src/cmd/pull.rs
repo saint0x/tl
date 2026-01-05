@@ -125,16 +125,14 @@ pub async fn run(
         );
 
         // 9. Sync working directory to imported checkpoint
+        // Note: delete_extra=false to preserve local files (Git-like behavior)
         println!();
         println!("{}", "Syncing working directory...".dimmed());
 
         let tree = store.read_tree(checkpoint.root_tree)?;
-        let result = restore_tree(&store, &tree, &repo_root, true)?;
+        let result = restore_tree(&store, &tree, &repo_root, false)?;
 
         println!("{} Synced {} files", "✓".green(), result.files_restored.to_string().green());
-        if result.files_deleted > 0 {
-            println!("  {} files removed (not in remote)", result.files_deleted.to_string().dimmed());
-        }
         if !result.errors.is_empty() {
             println!("{} {} errors during sync", "!".yellow(), result.errors.len());
             for err in result.errors.iter().take(3) {
