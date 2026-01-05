@@ -150,6 +150,41 @@ pub fn format_size(bytes: u64) -> String {
     }
 }
 
+/// Format duration in user-friendly format
+/// Shows the most significant unit without being overly granular
+pub fn format_duration(secs: u64) -> String {
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = MINUTE * 60;
+    const DAY: u64 = HOUR * 24;
+    const WEEK: u64 = DAY * 7;
+    const MONTH: u64 = DAY * 30;
+    const YEAR: u64 = DAY * 365;
+
+    if secs < 5 {
+        "just now".to_string()
+    } else if secs < MINUTE {
+        format!("{} seconds", secs)
+    } else if secs < HOUR {
+        let mins = secs / MINUTE;
+        if mins == 1 { "1 minute".to_string() } else { format!("{} minutes", mins) }
+    } else if secs < DAY {
+        let hours = secs / HOUR;
+        if hours == 1 { "1 hour".to_string() } else { format!("{} hours", hours) }
+    } else if secs < WEEK {
+        let days = secs / DAY;
+        if days == 1 { "1 day".to_string() } else { format!("{} days", days) }
+    } else if secs < MONTH {
+        let weeks = secs / WEEK;
+        if weeks == 1 { "1 week".to_string() } else { format!("{} weeks", weeks) }
+    } else if secs < YEAR {
+        let months = secs / MONTH;
+        if months == 1 { "1 month".to_string() } else { format!("{} months", months) }
+    } else {
+        let years = secs / YEAR;
+        if years == 1 { "1 year".to_string() } else { format!("{} years", years) }
+    }
+}
+
 /// Display a checkpoint in compact format
 pub fn display_checkpoint_compact(cp: &Checkpoint, show_ulid: bool) {
     let id_short = cp.id.to_string()[..8].to_string();

@@ -116,8 +116,6 @@ impl Daemon {
         let mut last_checkpoint = Instant::now();
         let checkpoint_interval = Duration::from_secs(5); // Create checkpoint every 5s
 
-        let start_time = Instant::now();
-
         loop {
             tokio::select! {
                 // Watcher events
@@ -185,11 +183,6 @@ impl Daemon {
 
                     // Send result back to IPC handler (ignore if receiver dropped)
                     let _ = response_tx.send(result);
-                }
-
-                // Update uptime periodically
-                _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                    self.status.write().await.uptime_secs = start_time.elapsed().as_secs();
                 }
 
                 // Handle IPC connections
@@ -707,10 +700,15 @@ async fn start_daemon_direct(repo_root: &Path) -> Result<()> {
     let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
     let (flush_tx, flush_rx) = mpsc::channel(10);  // Buffer up to 10 flush requests
 
+    let start_time_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+
     let status = Arc::new(RwLock::new(DaemonStatus {
         running: true,
         pid: std::process::id(),
-        uptime_secs: 0,
+        start_time_ms,
         checkpoints_created: 0,
         last_checkpoint_time: None,
         watcher_paths: 0,

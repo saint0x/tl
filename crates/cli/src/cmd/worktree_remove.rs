@@ -15,6 +15,9 @@ pub async fn run(name: &str, delete_files: bool, yes: bool) -> Result<()> {
 
     let tl_dir = repo_root.join(".tl");
 
+    // Ensure daemon is running
+    crate::daemon::ensure_daemon_running().await?;
+
     // 2. Verify JJ workspace exists
     if jj::detect_jj_workspace(&repo_root)?.is_none() {
         anyhow::bail!("No JJ workspace found. Run 'jj git init' first.");

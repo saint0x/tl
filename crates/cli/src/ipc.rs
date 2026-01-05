@@ -95,8 +95,8 @@ pub struct DaemonStatus {
     pub running: bool,
     /// Process ID
     pub pid: u32,
-    /// Uptime in seconds
-    pub uptime_secs: u64,
+    /// Daemon start time (ms since epoch)
+    pub start_time_ms: u64,
     /// Total checkpoints created by this daemon instance
     pub checkpoints_created: u64,
     /// Timestamp of last checkpoint (ms since epoch)
@@ -472,7 +472,7 @@ mod tests {
         let status = DaemonStatus {
             running: true,
             pid: 12345,
-            uptime_secs: 300,
+            start_time_ms: 1704067200000, // Fixed timestamp for testing
             checkpoints_created: 42,
             last_checkpoint_time: Some(1234567890),
             watcher_paths: 100,
@@ -484,7 +484,7 @@ mod tests {
 
         if let IpcResponse::Status(s) = deserialized {
             assert_eq!(s.pid, status.pid);
-            assert_eq!(s.uptime_secs, status.uptime_secs);
+            assert_eq!(s.start_time_ms, status.start_time_ms);
         } else {
             panic!("Expected Status response");
         }

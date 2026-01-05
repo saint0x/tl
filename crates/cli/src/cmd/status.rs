@@ -3,6 +3,7 @@
 use crate::util;
 use anyhow::{Context, Result};
 use owo_colors::OwoColorize;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub async fn run() -> Result<()> {
     // 1. Find repository root
@@ -39,7 +40,14 @@ pub async fn run() -> Result<()> {
     // Daemon status (always running since we connected successfully)
     println!("Daemon:        {}", "Running ✓".green());
     println!("  PID:         {}", status.pid);
-    println!("  Uptime:      {} seconds", status.uptime_secs);
+
+    // Calculate uptime from daemon start time
+    let current_time_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let uptime_secs = (current_time_ms.saturating_sub(status.start_time_ms)) / 1000;
+    println!("  Uptime:      {}", util::format_duration(uptime_secs));
     println!("  Checkpoints: {} created", status.checkpoints_created);
     if let Some(ts) = status.last_checkpoint_time {
         println!("  Last:        {}", util::format_relative_time(ts));
