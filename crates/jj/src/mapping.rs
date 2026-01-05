@@ -42,13 +42,12 @@ impl JjMapping {
     ///
     /// This is the forward mapping, used when we publish a checkpoint to JJ
     /// and want to remember which JJ commit it became.
+    ///
+    /// NOTE: Does not flush to disk. Call flush() after batch operations.
     pub fn set(&self, checkpoint_id: Ulid, jj_commit_id: &str) -> Result<()> {
         let key = checkpoint_id.to_string();
         self.db.insert(key.as_bytes(), jj_commit_id.as_bytes())
             .context("Failed to store checkpoint → JJ commit mapping")?;
-        self.db.flush()
-            .context("Failed to flush JJ mapping database")?;
-
         Ok(())
     }
 
@@ -70,14 +69,13 @@ impl JjMapping {
     ///
     /// This is used when importing JJ commits to find if we already have
     /// a checkpoint for this commit.
+    ///
+    /// NOTE: Does not flush to disk. Call flush() after batch operations.
     pub fn set_reverse(&self, jj_commit_id: &str, checkpoint_id: Ulid) -> Result<()> {
         let key = format!("rev:{}", jj_commit_id);
         let value = checkpoint_id.to_string();
         self.db.insert(key.as_bytes(), value.as_bytes())
             .context("Failed to store JJ commit → checkpoint mapping")?;
-        self.db.flush()
-            .context("Failed to flush JJ mapping database")?;
-
         Ok(())
     }
 
@@ -151,6 +149,16 @@ impl JjMapping {
         self.db.len() / 2
     }
 
+    /// Flush all pending writes to disk
+    ///
+    /// Call this after a batch of set/set_reverse operations to ensure
+    /// durability. This performs a single fsync instead of one per write.
+    pub fn flush(&self) -> Result<()> {
+        self.db.flush()
+            .map(|_| ()) // Discard the usize return value
+            .context("Failed to flush JJ mapping database")
+    }
+
     /// Clear all mappings (useful for testing or reset)
     pub fn clear(&self) -> Result<()> {
         self.db.clear()
@@ -163,11 +171,11 @@ impl JjMapping {
     ///
     /// The seed commit represents the initial repository state at init time.
     /// This enables incremental tree conversion for root checkpoints.
+    ///
+    /// NOTE: Does not flush to disk. Call flush() after batch operations.
     pub fn set_seed(&self, jj_commit_id: &str) -> Result<()> {
         self.db.insert(SEED_COMMIT_KEY.as_bytes(), jj_commit_id.as_bytes())
             .context("Failed to store seed commit mapping")?;
-        self.db.flush()
-            .context("Failed to flush JJ mapping database")?;
         Ok(())
     }
 
@@ -196,12 +204,12 @@ impl JjMapping {
     ///
     /// This is the Timelapse tree hash at init time, used for computing
     /// tree diffs when publishing without a published parent.
+    ///
+    /// NOTE: Does not flush to disk. Call flush() after batch operations.
     pub fn set_seed_tree(&self, tree_hash: &str) -> Result<()> {
         let key = format!("{}_TREE", SEED_COMMIT_KEY);
         self.db.insert(key.as_bytes(), tree_hash.as_bytes())
             .context("Failed to store seed tree hash")?;
-        self.db.flush()
-            .context("Failed to flush JJ mapping database")?;
         Ok(())
     }
 

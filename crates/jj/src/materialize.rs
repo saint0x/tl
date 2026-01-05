@@ -6,14 +6,19 @@
 //! 3. Handling checkpoint ranges (compact or expand modes)
 //!
 //! All operations support configurable behavior via options structs.
+//!
+//! Performance optimizations:
+//! - Skip blob read/write for objects that already exist in .git/objects/
+//! - Construct FileId directly from TL hash (same SHA-1 format as Git)
+//! - Single sled flush at end of publish operations
 
 use anyhow::{Context, Result};
 use jj_lib::backend::CopyId;
 use jj_lib::object_id::ObjectId;
 use journal::Checkpoint;
 use pollster::FutureExt as _;
-use std::path::PathBuf;
-use tl_core::{EntryKind, Store, Tree};
+use std::path::{Path, PathBuf};
+use tl_core::{EntryKind, Sha1Hash, Store, Tree};
 
 /// Options for commit message formatting
 #[derive(Debug, Clone)]
@@ -53,6 +58,11 @@ pub struct PublishOptions {
 
     /// For ranges: compact (single commit) or expand (one commit per checkpoint)
     pub compact_range: bool,
+
+    /// Pre-computed accumulated touched_paths (union of all paths from checkpoint
+    /// back to nearest published ancestor). If provided, used instead of tree diff.
+    /// This optimization avoids O(all_files) tree comparison when parent isn't published.
+    pub accumulated_paths: Option<Vec<PathBuf>>,
 }
 
 impl Default for PublishOptions {
@@ -61,6 +71,7 @@ impl Default for PublishOptions {
             auto_pin: Some("published".to_string()),
             message_options: CommitMessageOptions::default(),
             compact_range: false, // Default to expand (preserve fine-grained history)
+            accumulated_paths: None, // Computed by caller when needed
         }
     }
 }
@@ -136,6 +147,30 @@ fn expand_template(template: &str, checkpoint: &Checkpoint) -> String {
         .replace("{bytes_removed}", &checkpoint.meta.bytes_removed.to_string())
 }
 
+/// Check if a Git object already exists in .git/objects/
+///
+/// This enables skipping the read/decompress/recompress cycle for blobs
+/// that are already in Git's object store. TL uses Git-compatible blob
+/// format with identical SHA-1 hashing, so the hashes match exactly.
+#[inline]
+fn git_object_exists(repo_root: &Path, blob_hash: &Sha1Hash) -> bool {
+    let hex = blob_hash.to_hex();
+    let git_path = repo_root
+        .join(".git/objects")
+        .join(&hex[..2])
+        .join(&hex[2..]);
+    git_path.exists()
+}
+
+/// Construct a JJ FileId directly from a TL SHA-1 hash
+///
+/// TL uses Git-compatible blob format, so the SHA-1 hashes are identical.
+/// This allows us to create FileId without reading/writing the blob content.
+#[inline]
+fn file_id_from_hash(hash: &Sha1Hash) -> jj_lib::backend::FileId {
+    jj_lib::backend::FileId::new(hash.as_bytes().to_vec())
+}
+
 /// Convert Timelapse tree to JJ tree
 ///
 /// Converts a Timelapse tree representation to a JJ tree using native jj-lib APIs.
@@ -145,10 +180,13 @@ fn expand_template(template: &str, checkpoint: &Checkpoint) -> String {
 /// 3. Write blobs to JJ backend
 /// 4. Build JJ tree with proper TreeValue types (File, Symlink)
 /// 5. Write the tree hierarchy to backend
+///
+/// Performance: Skips blob read/write for objects already in .git/objects/
 pub fn convert_tree_to_jj(
     tl_tree: &Tree,
     store: &Store,
     jj_store: &std::sync::Arc<jj_lib::store::Store>,
+    repo_root: &Path,
 ) -> Result<jj_lib::backend::TreeId> {
     use jj_lib::repo_path::{RepoPath, RepoPathBuf};
     use jj_lib::backend::TreeValue;
@@ -168,22 +206,27 @@ pub fn convert_tree_to_jj(
             continue;
         }
 
-        // Read blob content from Timelapse store
-        let content = store.blob_store().read_blob(entry.blob_hash)
-            .with_context(|| format!("Failed to read blob for {}", path_str))?;
-
         // Convert path to RepoPath (returns Result in 0.36.0)
         let repo_path = RepoPath::from_internal_string(path_str)
             .with_context(|| format!("Invalid repo path: {}", path_str))?;
 
-        // Write blob to JJ store and get file ID/symlink ID (async methods need block_on)
+        // Write blob to JJ store and get file ID/symlink ID
         let tree_value = match entry.kind {
             EntryKind::File | EntryKind::ExecutableFile => {
-                // Write file to store (async with block_on)
-                let mut cursor = std::io::Cursor::new(&content);
-                let file_id = jj_store.write_file(repo_path, &mut cursor)
-                    .block_on()
-                    .with_context(|| format!("Failed to write file to JJ store: {}", path_str))?;
+                // OPTIMIZATION: Check if blob already exists in .git/objects/
+                // TL uses Git-compatible SHA-1 hashing, so we can construct FileId directly
+                let file_id = if git_object_exists(repo_root, &entry.blob_hash) {
+                    // Fast path: construct FileId directly from hash
+                    file_id_from_hash(&entry.blob_hash)
+                } else {
+                    // Slow path: read from TL, write to JJ
+                    let content = store.blob_store().read_blob(entry.blob_hash)
+                        .with_context(|| format!("Failed to read blob for {}", path_str))?;
+                    let mut cursor = std::io::Cursor::new(&content);
+                    jj_store.write_file(repo_path, &mut cursor)
+                        .block_on()
+                        .with_context(|| format!("Failed to write file to JJ store: {}", path_str))?
+                };
 
                 // Check if executable
                 let executable = matches!(entry.kind, EntryKind::ExecutableFile) || (entry.mode & 0o111 != 0);
@@ -194,7 +237,9 @@ pub fn convert_tree_to_jj(
                 }
             }
             EntryKind::Symlink => {
-                // Convert content to string for symlink target
+                // Symlinks need content for target - always read
+                let content = store.blob_store().read_blob(entry.blob_hash)
+                    .with_context(|| format!("Failed to read blob for {}", path_str))?;
                 let target = String::from_utf8(content)
                     .context("Symlink target is not valid UTF-8")?;
 
@@ -234,12 +279,15 @@ pub fn convert_tree_to_jj(
 /// Falls back to full conversion when:
 /// - No parent tree is provided
 /// - touched_paths is empty (safety fallback)
+///
+/// Performance: Skips blob read/write for objects already in .git/objects/
 pub fn convert_tree_to_jj_incremental(
     tl_tree: &Tree,
     store: &Store,
     jj_store: &std::sync::Arc<jj_lib::store::Store>,
     touched_paths: &[PathBuf],
     parent_jj_tree_id: Option<&jj_lib::backend::TreeId>,
+    repo_root: &Path,
 ) -> Result<jj_lib::backend::TreeId> {
     use jj_lib::repo_path::{RepoPath, RepoPathBuf};
     use jj_lib::backend::TreeValue;
@@ -250,7 +298,7 @@ pub fn convert_tree_to_jj_incremental(
         Some(tree_id) if !touched_paths.is_empty() => tree_id.clone(),
         _ => {
             // Full conversion needed
-            return convert_tree_to_jj(tl_tree, store, jj_store);
+            return convert_tree_to_jj(tl_tree, store, jj_store, repo_root);
         }
     };
 
@@ -269,19 +317,25 @@ pub fn convert_tree_to_jj_incremental(
         // Check if file exists in the new tree
         if let Some(entry) = tl_tree.get(path) {
             // File exists - add or update it
-            let content = store.blob_store().read_blob(entry.blob_hash)
-                .with_context(|| format!("Failed to read blob for {}", path_str))?;
-
             // Convert path to RepoPath (returns Result in 0.36.0)
             let repo_path = RepoPath::from_internal_string(&path_str)
                 .with_context(|| format!("Invalid repo path: {}", path_str))?;
 
             let tree_value = match entry.kind {
                 EntryKind::File | EntryKind::ExecutableFile => {
-                    let mut cursor = std::io::Cursor::new(&content);
-                    let file_id = jj_store.write_file(repo_path, &mut cursor)
-                        .block_on()
-                        .with_context(|| format!("Failed to write file to JJ store: {}", path_str))?;
+                    // OPTIMIZATION: Check if blob already exists in .git/objects/
+                    let file_id = if git_object_exists(repo_root, &entry.blob_hash) {
+                        // Fast path: construct FileId directly from hash
+                        file_id_from_hash(&entry.blob_hash)
+                    } else {
+                        // Slow path: read from TL, write to JJ
+                        let content = store.blob_store().read_blob(entry.blob_hash)
+                            .with_context(|| format!("Failed to read blob for {}", path_str))?;
+                        let mut cursor = std::io::Cursor::new(&content);
+                        jj_store.write_file(repo_path, &mut cursor)
+                            .block_on()
+                            .with_context(|| format!("Failed to write file to JJ store: {}", path_str))?
+                    };
 
                     let executable = matches!(entry.kind, EntryKind::ExecutableFile) || (entry.mode & 0o111 != 0);
                     TreeValue::File {
@@ -291,6 +345,9 @@ pub fn convert_tree_to_jj_incremental(
                     }
                 }
                 EntryKind::Symlink => {
+                    // Symlinks need content for target - always read
+                    let content = store.blob_store().read_blob(entry.blob_hash)
+                        .with_context(|| format!("Failed to read blob for {}", path_str))?;
                     let target = String::from_utf8(content)
                         .context("Symlink target is not valid UTF-8")?;
 
@@ -334,13 +391,15 @@ pub fn convert_tree_to_jj_incremental(
 /// 4. Build commit with CommitBuilder
 /// 5. Commit transaction
 /// 6. Store bidirectional mapping
-/// 7. Auto-pin if configured
+/// 7. Flush mapping database
+/// 8. Auto-pin if configured
 pub fn publish_checkpoint(
     checkpoint: &Checkpoint,
     store: &Store,
     workspace: &mut jj_lib::workspace::Workspace,
     mapping: &crate::mapping::JjMapping,
     options: &PublishOptions,
+    repo_root: &Path,
 ) -> Result<String> {
     use jj_lib::merged_tree::MergedTree;
     use jj_lib::repo::Repo;  // Import trait for methods
@@ -419,13 +478,17 @@ pub fn publish_checkpoint(
 
     // Determine which paths to process for incremental conversion
     // - If true parent: use checkpoint.touched_paths (paths changed from parent)
-    // - If seed fallback: compute tree diff between seed and current (all changes since init)
+    // - If accumulated_paths provided: use pre-computed union of touched_paths
+    // - Otherwise: fall back to tree diff (slow, O(all_files))
     let effective_touched_paths: Vec<PathBuf> = if use_true_parent {
         // True parent is published - touched_paths are correct
         checkpoint.touched_paths.clone()
+    } else if let Some(ref paths) = options.accumulated_paths {
+        // Use pre-computed accumulated paths (fast, O(changed_files))
+        paths.clone()
     } else if parent_jj_tree_id.is_some() {
-        // Using seed as base - compute full tree diff
-        // Load seed's TL tree to compare with current tree
+        // Legacy fallback - compute full tree diff (slow, O(all_files))
+        // This path is only taken when caller doesn't pre-compute accumulated_paths
         let seed_tree = load_seed_tree(store, mapping)?;
         compute_tree_diff_paths(&seed_tree, &tree)
     } else {
@@ -440,6 +503,7 @@ pub fn publish_checkpoint(
         jj_store,
         &effective_touched_paths,
         parent_jj_tree_id.as_ref(),
+        repo_root,
     )?;
 
     // Format commit message
@@ -472,6 +536,10 @@ pub fn publish_checkpoint(
     mapping.set_reverse(&commit_id, checkpoint.id)
         .context("Failed to store reverse mapping")?;
 
+    // Flush mapping database to disk (single flush instead of per-write)
+    mapping.flush()
+        .context("Failed to flush mapping database")?;
+
     // Auto-pin if configured
     if let Some(ref pin_name) = options.auto_pin {
         // Note: Auto-pinning would require integration with pin manager
@@ -494,7 +562,7 @@ pub fn publish_checkpoint(
 pub fn publish_range(
     checkpoints: Vec<Checkpoint>,
     store: &Store,
-    workspace: &mut jj_lib::workspace::Workspace,
+    repo_root: &Path,
     mapping: &crate::mapping::JjMapping,
     options: &PublishOptions,
 ) -> Result<Vec<String>> {
@@ -505,10 +573,13 @@ pub fn publish_range(
         return Ok(vec![]);
     }
 
+    // Load workspace here to share between compact and expand modes
+    let mut workspace = crate::load_workspace(repo_root)?;
+
     // Compact mode: only publish the last checkpoint
     if options.compact_range {
         if let Some(last) = checkpoints.last() {
-            let commit_id = publish_checkpoint(last, store, workspace, mapping, options)?;
+            let commit_id = publish_checkpoint(last, store, &mut workspace, mapping, options, repo_root)?;
             return Ok(vec![commit_id]);
         }
         return Ok(vec![]);
@@ -520,6 +591,7 @@ pub fn publish_range(
     // Load repo ONCE
     let repo = workspace.repo_loader().load_at_head()
         .context("Failed to load repo")?;
+    let workspace_name = workspace.workspace_name().to_owned();
 
     // Start transaction ONCE
     let mut tx = repo.start_transaction();
@@ -542,14 +614,21 @@ pub fn publish_range(
             mapping,
             &jj_store,
             tx.repo_mut(),
-            workspace,
+            &workspace_name,
             last_commit.as_ref(),
         )?;
 
         // Determine effective touched paths
+        // - If true parent: use checkpoint.touched_paths (paths changed from parent)
+        // - If accumulated_paths provided: use pre-computed union of touched_paths
+        // - Otherwise: fall back to tree diff (slow, O(all_files))
         let effective_touched_paths: Vec<PathBuf> = if use_true_parent {
             checkpoint.touched_paths.clone()
+        } else if let Some(ref paths) = options.accumulated_paths {
+            // Use pre-computed accumulated paths (fast, O(changed_files))
+            paths.clone()
         } else if parent_jj_tree_id.is_some() {
+            // Legacy fallback - compute full tree diff (slow, O(all_files))
             let seed_tree = load_seed_tree(store, mapping)?;
             compute_tree_diff_paths(&seed_tree, &tree)
         } else {
@@ -557,12 +636,14 @@ pub fn publish_range(
         };
 
         // Convert tree (incremental if possible)
+        // OPTIMIZATION: Pass repo_root to enable git_object_exists check
         let jj_tree_id = convert_tree_to_jj_incremental(
             &tree,
             store,
             &jj_store,
             &effective_touched_paths,
             parent_jj_tree_id.as_ref(),
+            repo_root,
         )?;
 
         // Format commit message
@@ -578,9 +659,9 @@ pub fn publish_range(
         let commit_id = commit.id().hex();
 
         // Update working copy pointer
-        mut_repo.set_wc_commit(workspace.workspace_name().to_owned(), commit.id().clone())?;
+        mut_repo.set_wc_commit(workspace_name.clone(), commit.id().clone())?;
 
-        // Store bidirectional mapping (with per-checkpoint flush for crash safety)
+        // Store bidirectional mapping (no per-write flush - single flush at end)
         mapping.set(checkpoint.id, &commit_id)
             .context("Failed to store checkpoint mapping")?;
         mapping.set_reverse(&commit_id, checkpoint.id)
@@ -594,6 +675,10 @@ pub fn publish_range(
     tx.commit("publish checkpoints")
         .context("Failed to commit transaction")?;
 
+    // Flush mapping database to disk (single flush instead of per-write)
+    mapping.flush()
+        .context("Failed to flush mapping database")?;
+
     Ok(commit_ids)
 }
 
@@ -605,7 +690,7 @@ fn determine_parents(
     mapping: &crate::mapping::JjMapping,
     jj_store: &std::sync::Arc<jj_lib::store::Store>,
     mut_repo: &jj_lib::repo::MutableRepo,
-    workspace: &jj_lib::workspace::Workspace,
+    workspace_name: &jj_lib::ref_name::WorkspaceName,
     last_commit: Option<&jj_lib::commit::Commit>,
 ) -> Result<(Vec<jj_lib::backend::CommitId>, Option<jj_lib::backend::TreeId>, bool)> {
     use jj_lib::repo::Repo;
@@ -632,7 +717,7 @@ fn determine_parents(
         }
 
         // Parent not published - use seed tree as fallback
-        let wc_commit_id = Repo::view(mut_repo).get_wc_commit_id(workspace.workspace_name())
+        let wc_commit_id = Repo::view(mut_repo).get_wc_commit_id(workspace_name)
             .ok_or_else(|| anyhow::anyhow!("No working copy commit found"))?;
 
         let seed_tree_id = mapping.get_seed()?.and_then(|seed_commit_id_str| {

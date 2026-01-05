@@ -83,6 +83,25 @@ pub async fn run(
     // Otherwise, use tree-diff fallback for efficiency
     let checkpoints = smart_chain_publish(checkpoints, &mapping, &tl_dir).await?;
 
+    // 5.6 Compute accumulated_paths for the first checkpoint if its parent isn't published
+    // This avoids O(all_files) tree diff by using O(chain_length * touched_paths)
+    let accumulated_paths = if let Some(first_cp) = checkpoints.first() {
+        // Check if first checkpoint's parent is published
+        let parent_published = match first_cp.parent {
+            Some(parent_id) => mapping.get_jj_commit(parent_id)?.is_some(),
+            None => true, // Root checkpoint - seed commit is the parent
+        };
+
+        if !parent_published {
+            // Compute accumulated touched_paths from chain
+            Some(accumulate_touched_paths(first_cp, &mapping, &tl_dir).await?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // 6. Configure publish options
     let mut msg_options = CommitMessageOptions::default();
     if let Some(template) = message_template {
@@ -93,6 +112,7 @@ pub async fn run(
         auto_pin: if no_pin { None } else { Some("published".to_string()) },
         message_options: msg_options,
         compact_range: compact,
+        accumulated_paths,
     };
 
     // 7. Publish checkpoint(s)
@@ -195,9 +215,10 @@ async fn parse_checkpoint_range(
     Ok(checkpoints)
 }
 
-/// Maximum gap between checkpoints before falling back to tree-diff
-/// Publishing 20 checkpoints is fast (~100-200ms), beyond that use tree-diff
-const MAX_CHAIN_GAP: usize = 20;
+/// Maximum gap between checkpoints before falling back to accumulated paths
+/// This limit determines how many checkpoints we'll publish in chain.
+/// Beyond this, we use accumulated_paths (still fast) instead of chain publishing.
+const MAX_CHAIN_GAP: usize = 100;
 
 /// Smart chain publishing: find nearest published ancestor and publish minimal chain
 ///
@@ -323,4 +344,48 @@ async fn find_chain_to_published_ancestor(
         current = parent;
         depth += 1;
     }
+}
+
+/// Compute accumulated touched_paths from checkpoint back to nearest published ancestor
+///
+/// Returns the union of all touched_paths from the checkpoint chain back to
+/// the nearest published ancestor. This is O(chain_length * avg_touched_paths)
+/// instead of O(all_files_in_repo) for tree diff.
+///
+/// Uses IPC to load checkpoints when daemon is running (avoids journal lock conflict).
+async fn accumulate_touched_paths(
+    checkpoint: &Checkpoint,
+    mapping: &JjMapping,
+    tl_dir: &std::path::Path,
+) -> Result<Vec<std::path::PathBuf>> {
+    let mut paths: HashSet<std::path::PathBuf> = HashSet::new();
+    let mut current = checkpoint.clone();
+
+    // Walk back through checkpoint chain
+    loop {
+        // Add touched paths from current checkpoint
+        for path in &current.touched_paths {
+            paths.insert(path.clone());
+        }
+
+        // Check if parent exists and is published
+        let parent_id = match current.parent {
+            Some(id) => id,
+            None => break, // Root checkpoint
+        };
+
+        // If parent is published, we're done
+        if mapping.get_jj_commit(parent_id)?.is_some() {
+            break;
+        }
+
+        // Load parent checkpoint via IPC
+        let cps = crate::data_access::get_checkpoints(&[parent_id], tl_dir).await?;
+        current = match &cps[0] {
+            Some(c) => c.clone(),
+            None => break, // Parent not found (possibly GC'd)
+        };
+    }
+
+    Ok(paths.into_iter().collect())
 }

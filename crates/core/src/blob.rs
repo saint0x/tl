@@ -82,12 +82,19 @@ impl Blob {
 }
 
 /// Blob storage with caching (Git-compatible)
+///
+/// Supports dual-write mode: when `git_objects_root` is set, blobs are
+/// written to both `.tl/objects/` and `.git/objects/`. This enables
+/// fast publish by ensuring blobs already exist in Git's object store.
 pub struct BlobStore {
-    /// Root directory for blob storage
+    /// Root directory for blob storage (.tl/)
     root: PathBuf,
+    /// Optional path to .git/objects/ for dual-write
+    git_objects_root: Option<PathBuf>,
     /// In-memory cache: hash -> blob metadata
     cache: DashMap<Sha1Hash, Arc<Blob>>,
     /// Maximum cache size in bytes (default: 50MB)
+    #[allow(dead_code)]
     max_cache_size: usize,
 }
 
@@ -96,22 +103,49 @@ impl BlobStore {
     pub fn new(root: PathBuf) -> Self {
         Self {
             root,
+            git_objects_root: None,
             cache: DashMap::new(),
             max_cache_size: 50 * 1024 * 1024, // 50 MB
         }
     }
 
+    /// Enable dual-write to Git objects directory
+    ///
+    /// When set, blobs will be written to both `.tl/objects/` and
+    /// the specified Git objects directory (typically `.git/objects/`).
+    /// This enables fast publish by pre-populating Git's object store.
+    pub fn with_git_objects(mut self, git_objects_root: PathBuf) -> Self {
+        self.git_objects_root = Some(git_objects_root);
+        self
+    }
+
+    /// Set Git objects root at runtime
+    ///
+    /// Useful when the Git directory isn't known at store creation time.
+    pub fn set_git_objects_root(&mut self, git_objects_root: PathBuf) {
+        self.git_objects_root = Some(git_objects_root);
+    }
+
     /// Write a blob to storage in Git format
+    ///
+    /// If `git_objects_root` is set, also writes to `.git/objects/` for fast publish.
     pub fn write_blob(&self, hash: Sha1Hash, data: &[u8]) -> Result<()> {
         use std::fs;
 
-        // Check if blob already exists
+        // Check if blob already exists in TL store
         let blob_path = self.blob_path(hash);
-        if blob_path.exists() {
-            return Ok(()); // Already stored, idempotent
+        let tl_exists = blob_path.exists();
+
+        // Check if blob exists in Git store (if configured)
+        let git_path = self.git_blob_path(hash);
+        let git_exists = git_path.as_ref().map(|p| p.exists()).unwrap_or(true);
+
+        // If blob exists in both locations, nothing to do
+        if tl_exists && git_exists {
+            return Ok(());
         }
 
-        // Create blob with Git format
+        // Create blob with Git format (only if we need to write somewhere)
         let (blob, compressed) = Blob::from_bytes(data)?;
 
         // Verify hash matches
@@ -123,30 +157,61 @@ impl BlobStore {
             );
         }
 
-        // Ensure parent directory exists
-        if let Some(parent) = blob_path.parent() {
-            fs::create_dir_all(parent)?;
+        // Write to TL store if needed
+        if !tl_exists {
+            // Ensure parent directory exists
+            if let Some(parent) = blob_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+
+            // Atomic write pattern: write to temp, fsync, rename
+            let tmp_dir = self.root.join("tmp").join("ingest");
+            fs::create_dir_all(&tmp_dir)?;
+
+            let temp_path = tmp_dir.join(format!("{}-{}", uuid::Uuid::new_v4(), hash.to_hex()));
+
+            // Write to temp file
+            let mut temp_file = fs::File::create(&temp_path)?;
+            temp_file.write_all(&compressed)?;
+            temp_file.sync_all()?; // fsync file
+            drop(temp_file);
+
+            // Rename to final location
+            fs::rename(&temp_path, &blob_path)?;
+
+            // Fsync parent directory for durability
+            if let Some(parent) = blob_path.parent() {
+                if let Ok(dir) = fs::File::open(parent) {
+                    let _ = dir.sync_all(); // Best effort, may fail on some filesystems
+                }
+            }
         }
 
-        // Atomic write pattern: write to temp, fsync, rename
-        let tmp_dir = self.root.join("tmp").join("ingest");
-        fs::create_dir_all(&tmp_dir)?;
+        // Write to Git store if configured and not already there
+        if let Some(ref git_path) = git_path {
+            if !git_exists {
+                // Ensure parent directory exists
+                if let Some(parent) = git_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
 
-        let temp_path = tmp_dir.join(format!("{}-{}", uuid::Uuid::new_v4(), hash.to_hex()));
+                // Write directly (no temp file needed - Git is more tolerant)
+                // But still use atomic pattern for safety
+                let git_tmp_dir = self.git_objects_root.as_ref()
+                    .map(|r| r.join("tmp_tl"));
 
-        // Write to temp file
-        let mut temp_file = fs::File::create(&temp_path)?;
-        temp_file.write_all(&compressed)?;
-        temp_file.sync_all()?; // fsync file
-        drop(temp_file);
+                if let Some(ref tmp_dir) = git_tmp_dir {
+                    fs::create_dir_all(tmp_dir)?;
+                    let temp_path = tmp_dir.join(format!("{}-{}", uuid::Uuid::new_v4(), hash.to_hex()));
 
-        // Rename to final location
-        fs::rename(&temp_path, &blob_path)?;
+                    let mut temp_file = fs::File::create(&temp_path)?;
+                    temp_file.write_all(&compressed)?;
+                    temp_file.sync_all()?;
+                    drop(temp_file);
 
-        // Fsync parent directory for durability
-        if let Some(parent) = blob_path.parent() {
-            if let Ok(dir) = fs::File::open(parent) {
-                let _ = dir.sync_all(); // Best effort, may fail on some filesystems
+                    // Rename to final location (ignore errors - Git may be writing too)
+                    let _ = fs::rename(&temp_path, git_path);
+                }
             }
         }
 
@@ -207,6 +272,16 @@ impl BlobStore {
         let prefix = &hex[0..2];
         let rest = &hex[2..];
         self.root.join("objects").join(prefix).join(rest)
+    }
+
+    /// Get the Git objects path for a blob (if dual-write is enabled)
+    fn git_blob_path(&self, hash: Sha1Hash) -> Option<PathBuf> {
+        self.git_objects_root.as_ref().map(|root| {
+            let hex = hash.to_hex();
+            let prefix = &hex[0..2];
+            let rest = &hex[2..];
+            root.join(prefix).join(rest)
+        })
     }
 }
 

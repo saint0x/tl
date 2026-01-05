@@ -124,6 +124,7 @@ pub fn publish_checkpoint(
         &mut workspace,
         mapping,
         options,
+        repo_root,
     )
 }
 
@@ -141,14 +142,11 @@ pub fn publish_range(
     mapping: &JjMapping,
     options: &PublishOptions,
 ) -> Result<Vec<String>> {
-    // Load JJ workspace using native API
-    let mut workspace = crate::load_workspace(repo_root)?;
-
-    // Delegate to native implementation
+    // Delegate to native implementation (workspace loaded internally)
     crate::materialize::publish_range(
         checkpoints,
         store,
-        &mut workspace,
+        repo_root,
         mapping,
         options,
     )
@@ -444,6 +442,7 @@ mod tests {
             auto_pin: None,
             message_options: crate::materialize::CommitMessageOptions::default(),
             compact_range: true,
+            accumulated_paths: None,
         };
 
         let commit_ids = publish_range(vec![cp1.clone(), cp2.clone()], &store, temp_dir.path(), &mapping, &options)?;
@@ -474,6 +473,7 @@ mod tests {
             auto_pin: None,
             message_options: crate::materialize::CommitMessageOptions::default(),
             compact_range: false, // Expand mode
+            accumulated_paths: None,
         };
 
         let commit_ids = publish_range(vec![cp1.clone(), cp2.clone()], &store, temp_dir.path(), &mapping, &options)?;
@@ -502,6 +502,7 @@ mod tests {
             auto_pin: None,
             message_options: crate::materialize::CommitMessageOptions::default(),
             compact_range: false,
+            accumulated_paths: None,
         };
 
         let commit_ids = publish_range(vec![], &store, temp_dir.path(), &mapping, &options)?;
@@ -578,6 +579,7 @@ mod tests {
                 max_files_shown: 10,
             },
             compact_range: false,
+            accumulated_paths: None,
         };
 
         let commit_id = publish_checkpoint(&checkpoint, &store, temp_dir.path(), &mapping, &options)?;

@@ -96,8 +96,8 @@ email = ""
         // Create empty HEAD file (points to current checkpoint)
         fs::write(tl_dir.join("HEAD"), "")?;
 
-        // Initialize blob store
-        let blob_store = BlobStore::new(tl_dir.clone());
+        // Initialize blob store with dual-write to .git/objects/ if Git exists
+        let blob_store = Self::create_blob_store(&tl_dir, repo_root);
 
         Ok(Self {
             root: repo_root.to_path_buf(),
@@ -140,8 +140,8 @@ email = ""
             anyhow::bail!("Missing config.toml");
         }
 
-        // Initialize blob store
-        let blob_store = BlobStore::new(tl_dir.clone());
+        // Initialize blob store with dual-write to .git/objects/ if Git exists
+        let blob_store = Self::create_blob_store(&tl_dir, repo_root);
 
         Ok(Self {
             root: repo_root.to_path_buf(),
@@ -149,6 +149,24 @@ email = ""
             blob_store,
             tree_cache: DashMap::new(),
         })
+    }
+
+    /// Create blob store with optional dual-write to .git/objects/
+    ///
+    /// If a .git directory exists, blobs will be written to both
+    /// .tl/objects/ and .git/objects/ for fast publish.
+    fn create_blob_store(tl_dir: &Path, repo_root: &Path) -> BlobStore {
+        let git_dir = repo_root.join(".git");
+        let git_objects = git_dir.join("objects");
+
+        let blob_store = BlobStore::new(tl_dir.to_path_buf());
+
+        // Enable dual-write if .git/objects exists
+        if git_objects.exists() {
+            blob_store.with_git_objects(git_objects)
+        } else {
+            blob_store
+        }
     }
 
     /// Write a tree to storage
