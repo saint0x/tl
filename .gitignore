@@ -32,6 +32,6 @@ test-file.txt
 test-repo/
 tl-client.sh
 TL-CLIENT-GUIDE.md
-status.md
-plan.md
-plan/
+STATUS.md
+PLAN.md
+plan-ascending/
