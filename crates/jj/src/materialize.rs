@@ -408,6 +408,10 @@ pub fn publish_checkpoint(
     let repo = workspace.repo_loader().load_at_head()
         .context("Failed to load repo")?;
 
+    // Get user settings for author/committer signature
+    let user_settings = crate::create_user_settings()
+        .context("Failed to create user settings")?;
+
     // Start transaction (no longer takes user_settings in 0.36.0)
     let mut tx = repo.start_transaction();
     let mut_repo = tx.repo_mut();
@@ -514,11 +518,16 @@ pub fn publish_checkpoint(
     // Create MergedTree::resolved from the single tree ID
     let merged_tree = MergedTree::resolved(jj_store.clone(), jj_tree_id);
 
+    // Get author/committer signature from user settings
+    let author_signature = user_settings.signature();
+
     let commit = mut_repo.new_commit(
         parent_ids,
         merged_tree,
     )
     .set_description(commit_message)
+    .set_author(author_signature.clone())
+    .set_committer(author_signature)
     .write()?;
 
     let commit_id = commit.id().hex();
@@ -593,6 +602,11 @@ pub fn publish_range(
         .context("Failed to load repo")?;
     let workspace_name = workspace.workspace_name().to_owned();
 
+    // Get user settings for author/committer signature
+    let user_settings = crate::create_user_settings()
+        .context("Failed to create user settings")?;
+    let author_signature = user_settings.signature();
+
     // Start transaction ONCE
     let mut tx = repo.start_transaction();
 
@@ -654,6 +668,8 @@ pub fn publish_range(
         let merged_tree = MergedTree::resolved(jj_store.clone(), jj_tree_id);
         let commit = mut_repo.new_commit(parent_ids, merged_tree)
             .set_description(commit_message)
+            .set_author(author_signature.clone())
+            .set_committer(author_signature.clone())
             .write()?;
 
         let commit_id = commit.id().hex();

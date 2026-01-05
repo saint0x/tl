@@ -165,12 +165,28 @@ fn initialize_jj_if_needed(
 
     println!("{} Created .jj/ workspace", "✓".green());
 
-    // Configure bookmarks for timelapse workflow (using native config API)
-    if let Err(e) = jj::configure_jj_native(repo_root) {
+    // Get git user config to configure JJ with same identity
+    let (user_name, user_email) = crate::util::parse_git_user_config(repo_root)?
+        .map(|(n, e)| (Some(n), Some(e)))
+        .unwrap_or((None, None));
+
+    // Configure bookmarks and user identity for timelapse workflow
+    if let Err(e) = jj::configure_jj_with_user(
+        repo_root,
+        user_name.as_deref(),
+        user_email.as_deref(),
+    ) {
         println!(
-            "{} Warning: Could not configure JJ bookmarks: {}",
+            "{} Warning: Could not configure JJ: {}",
             "!".yellow(),
             e
+        );
+    } else if user_name.is_some() && user_email.is_some() {
+        println!(
+            "  {} Configured JJ user: {} <{}>",
+            "✓".green(),
+            user_name.as_ref().unwrap(),
+            user_email.as_ref().unwrap()
         );
     }
 

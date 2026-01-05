@@ -306,6 +306,25 @@ pub fn create_bookmark_native(
 ///
 /// Returns `JjError::OperationFailed` if configuration fails.
 pub fn configure_jj_native(repo_root: &Path) -> Result<()> {
+    configure_jj_with_user(repo_root, None, None)
+}
+
+/// Configure JJ workspace with optional user identity
+///
+/// Sets up JJ repo-level configuration including:
+/// - Bookmark prefix for timelapse workflow
+/// - User name and email (required for pushing commits)
+///
+/// # Arguments
+///
+/// * `repo_root` - Path to the repository root
+/// * `user_name` - Optional user name (from git config)
+/// * `user_email` - Optional user email (from git config)
+pub fn configure_jj_with_user(
+    repo_root: &Path,
+    user_name: Option<&str>,
+    user_email: Option<&str>,
+) -> Result<()> {
     use std::fs;
 
     // JJ stores repo-level config in .jj/repo/config.toml
@@ -317,9 +336,23 @@ pub fn configure_jj_native(repo_root: &Path) -> Result<()> {
             .context("Failed to create .jj/repo directory")?;
     }
 
-    // Create TOML config content
-    let config_content = r#"# Timelapse JJ Configuration
+    // Build config content with user section if provided
+    let user_section = match (user_name, user_email) {
+        (Some(name), Some(email)) => format!(
+            r#"
+[user]
+name = "{}"
+email = "{}"
+"#,
+            name, email
+        ),
+        _ => String::new(),
+    };
 
+    // Create TOML config content
+    let config_content = format!(
+        r#"# Timelapse JJ Configuration
+{}
 [revsets]
 log = "bookmarks() | @"
 
@@ -328,7 +361,9 @@ push-bookmark-prefix = "tl/"
 
 [ui]
 default-description = ""
-"#;
+"#,
+        user_section
+    );
 
     // Write config file (overwrites if exists, but that's fine - we want these settings)
     fs::write(&config_path, config_content)
