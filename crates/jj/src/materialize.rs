@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use tl_core::{Store, Tree, EntryKind};
 use journal::Checkpoint;
 use jj_lib::backend::ObjectId;
+use std::path::PathBuf;
 
 /// Options for commit message formatting
 #[derive(Debug, Clone)]
@@ -214,6 +215,94 @@ pub fn convert_tree_to_jj(
     Ok(tree_id)
 }
 
+/// Convert Timelapse tree to JJ tree (incremental mode)
+///
+/// When a parent JJ tree is available, only processes changed paths instead of
+/// the entire tree. This provides O(changed_files) performance instead of O(total_files).
+///
+/// Falls back to full conversion when:
+/// - No parent tree is provided
+/// - touched_paths is empty (safety fallback)
+pub fn convert_tree_to_jj_incremental(
+    tl_tree: &Tree,
+    store: &Store,
+    jj_store: &std::sync::Arc<jj_lib::store::Store>,
+    touched_paths: &[PathBuf],
+    parent_jj_tree_id: Option<&jj_lib::backend::TreeId>,
+) -> Result<jj_lib::backend::TreeId> {
+    use jj_lib::repo_path::{RepoPath, RepoPathBuf};
+    use jj_lib::backend::TreeValue;
+    use jj_lib::tree_builder::TreeBuilder;
+
+    // Fall back to full conversion if no parent tree or no touched paths
+    let base_tree_id = match parent_jj_tree_id {
+        Some(tree_id) if !touched_paths.is_empty() => tree_id.clone(),
+        _ => {
+            // Full conversion needed
+            return convert_tree_to_jj(tl_tree, store, jj_store);
+        }
+    };
+
+    // Create TreeBuilder starting from parent tree
+    let mut tree_builder = TreeBuilder::new(jj_store.clone(), base_tree_id);
+
+    // Process only the touched paths
+    for path in touched_paths {
+        let path_str = path.to_string_lossy().into_owned();
+
+        // Skip protected directories
+        if path_str.starts_with(".tl/") || path_str.starts_with(".git/") || path_str.starts_with(".jj/") {
+            continue;
+        }
+
+        // Check if file exists in the new tree
+        if let Some(entry) = tl_tree.get(path) {
+            // File exists - add or update it
+            let content = store.blob_store().read_blob(entry.blob_hash)
+                .with_context(|| format!("Failed to read blob for {}", path_str))?;
+
+            let repo_path = RepoPath::from_internal_string(&path_str);
+
+            let tree_value = match entry.kind {
+                EntryKind::File | EntryKind::ExecutableFile => {
+                    let mut cursor = std::io::Cursor::new(&content);
+                    let file_id = jj_store.write_file(&repo_path, &mut cursor)
+                        .with_context(|| format!("Failed to write file to JJ store: {}", path_str))?;
+
+                    let executable = matches!(entry.kind, EntryKind::ExecutableFile) || (entry.mode & 0o111 != 0);
+                    TreeValue::File {
+                        id: file_id,
+                        executable,
+                    }
+                }
+                EntryKind::Symlink => {
+                    let target = String::from_utf8(content)
+                        .context("Symlink target is not valid UTF-8")?;
+
+                    let symlink_id = jj_store.write_symlink(&repo_path, &target)
+                        .with_context(|| format!("Failed to write symlink to JJ store: {}", path_str))?;
+
+                    TreeValue::Symlink(symlink_id)
+                }
+                EntryKind::Tree => {
+                    // Skip tree entries - TreeBuilder handles directories automatically
+                    continue;
+                }
+            };
+
+            tree_builder.set(RepoPathBuf::from_internal_string(path_str.clone()), tree_value);
+        } else {
+            // File doesn't exist in new tree - it was deleted
+            let repo_path = RepoPathBuf::from_internal_string(path_str);
+            tree_builder.remove(repo_path);
+        }
+    }
+
+    // Write the tree and return
+    let tree_id = tree_builder.write_tree();
+    Ok(tree_id)
+}
+
 /// Publish a single checkpoint to JJ
 ///
 /// Creates a JJ commit from the checkpoint using native jj-lib APIs.
@@ -234,6 +323,7 @@ pub fn publish_checkpoint(
 ) -> Result<String> {
     use jj_lib::settings::UserSettings;
     use jj_lib::repo::Repo;  // Import trait for methods
+    use jj_lib::backend::MergedTreeId;
 
     // Get user settings from workspace
     // Create default settings if workspace doesn't have them
@@ -248,30 +338,49 @@ pub fn publish_checkpoint(
     // Start transaction
     let mut tx = repo.start_transaction(&user_settings);
     let mut_repo = tx.mut_repo();
+    let jj_store = Repo::store(mut_repo);
 
-    // Convert Timelapse tree to JJ tree
-    let jj_store = Repo::store(mut_repo);  // Use trait method explicitly
+    // Determine parent commits and get parent's JJ tree for incremental conversion
+    let (parent_ids, parent_jj_tree_id): (Vec<_>, Option<jj_lib::backend::TreeId>) =
+        if let Some(parent_cp_id) = checkpoint.parent {
+            // Parent checkpoint exists - check if it's published to JJ
+            if let Some(jj_commit_id_str) = mapping.get_jj_commit(parent_cp_id)? {
+                // Parent is published - get its commit and tree
+                let parent_commit_id = jj_lib::backend::CommitId::from_hex(&jj_commit_id_str);
+
+                // Try to get parent's tree ID for incremental conversion
+                let parent_tree_id = match jj_store.get_commit(&parent_commit_id) {
+                    Ok(parent_commit) => {
+                        match parent_commit.tree_id() {
+                            MergedTreeId::Legacy(tree_id) => Some(tree_id.clone()),
+                            MergedTreeId::Merge(_) => None, // Merge trees need full conversion
+                        }
+                    }
+                    Err(_) => None, // Can't get commit, fall back to full conversion
+                };
+
+                (vec![parent_commit_id], parent_tree_id)
+            } else {
+                // Parent not published, use current @, no incremental possible
+                let wc_commit_id = Repo::view(mut_repo).get_wc_commit_id(workspace.workspace_id())
+                    .ok_or_else(|| anyhow::anyhow!("No working copy commit found"))?;
+                (vec![wc_commit_id.clone()], None)
+            }
+        } else {
+            // Root checkpoint - use root commit as parent, no incremental possible
+            (vec![Repo::store(mut_repo).root_commit_id().clone()], None)
+        };
+
+    // Convert Timelapse tree to JJ tree (incremental if possible)
     let tree = store.read_tree(checkpoint.root_tree)
         .context("Failed to read checkpoint tree")?;
-    let jj_tree_id = convert_tree_to_jj(&tree, store, jj_store)?;
-
-    // Determine parent commits (from mapping or current @)
-    let parent_ids = if let Some(parent_cp_id) = checkpoint.parent {
-        // Parent exists - check if it's published
-        if let Some(jj_commit_id_str) = mapping.get_jj_commit(parent_cp_id)? {
-            // Parent is published, use it
-            let parent_commit_id = jj_lib::backend::CommitId::from_hex(&jj_commit_id_str);
-            vec![parent_commit_id]
-        } else {
-            // Parent not published, use current @
-            let wc_commit_id = Repo::view(mut_repo).get_wc_commit_id(workspace.workspace_id())
-                .ok_or_else(|| anyhow::anyhow!("No working copy commit found"))?;
-            vec![wc_commit_id.clone()]
-        }
-    } else {
-        // Root checkpoint - use root commit as parent
-        vec![Repo::store(mut_repo).root_commit_id().clone()]
-    };
+    let jj_tree_id = convert_tree_to_jj_incremental(
+        &tree,
+        store,
+        jj_store,
+        &checkpoint.touched_paths,
+        parent_jj_tree_id.as_ref(),
+    )?;
 
     // Format commit message
     let commit_message = format_commit_message(checkpoint, &options.message_options);
