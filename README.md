@@ -51,10 +51,14 @@ tl info                    # Show detailed repository information
 
 ### Checkpoint Operations
 ```bash
-tl log                     # Show checkpoint timeline (default: 20)
+tl log                     # Show checkpoint timeline (default: 20, displays 📌 pins)
 tl log --limit 50         # Show more checkpoints
-tl restore <checkpoint>    # Restore working tree to checkpoint
-tl diff <id-a> <id-b>     # Show diff between checkpoints
+tl restore <checkpoint>    # Restore working tree to checkpoint (interactive)
+tl restore <checkpoint> -y # Restore without confirmation (for automation)
+tl diff <id-a> <id-b>     # Show file-level diff between checkpoints
+tl diff <id-a> <id-b> -p  # Show line-by-line diff (unified format)
+tl diff <id-a> <id-b> -p -U 5  # Show diff with 5 context lines
+tl diff <id-a> <id-b> -p --max-files 20  # Limit line diffs to 20 files
 ```
 
 ### Pin Management
@@ -119,7 +123,7 @@ tl restore 01KE5RW2         # Restore using short ID
 ### Design Principles
 
 1. **Git-native content addressing**: SHA-1 hashing with Git blob/tree object format
-2. **Jujutsu foundation**: Built on JJ (Google's next-gen VCS) for production-grade Git interop
+2. **Jujutsu foundation**: Built on JJ for production-grade Git interop
 3. **Incremental update computation**: Only changed files rehashed per checkpoint (O(k) complexity)
 4. **Append-only journal**: Checkpoint metadata in embedded database (Sled)
 5. **File system event-driven**: Platform-native watchers (FSEvents, inotify)
@@ -294,7 +298,7 @@ Performance-critical path for sub-10ms checkpoint creation:
 
 ### Jujutsu Integration Layer
 
-**Foundation:** Timelapse is built on [Jujutsu](https://github.com/martinvonz/jj), a next-generation VCS by Google designed for scalable version control.
+**Foundation:** Timelapse is built on [Jujutsu](https://github.com/martinvonz/jj), a next-generation VCS designed for scalable version control.
 
 **Why Jujutsu?**
 - **Production-grade**: Developed by Google for managing massive monorepos
@@ -361,7 +365,7 @@ Content addressing provides automatic deduplication:
 ### Benchmarking Methodology
 
 Performance measurements conducted on:
-- **Hardware**: M1 MacBook Pro (Apple Silicon), 16GB RAM, APFS
+- **Hardware**: M3 MacBook Pro (Apple Silicon), 16GB RAM, APFS
 - **Test Method**: Event-driven integration tests with deterministic checkpoint creation
 - **Measurement**: Actual measured performance from integration test suite
 - **Reliability**: Zero false positives, 100% pass rate (16/16 tests)
@@ -390,96 +394,6 @@ Timelapse is implemented as a Rust workspace with five crates:
 | `timelapse-cli` | Command-line interface | ✅ 100% | 14 passing |
 | `timelapse-jj` | Jujutsu integration (JJ CLI-based) | ✅ 70% (functional) | 24 passing |
 
-**Overall progress**: ✅ Phases 1-6 Complete — Production Ready (195 tests passing)
-
-### Phase Breakdown
-
-**Phase 1: Core Storage** ✅ Complete
-- SHA-1 hashing (Git-compatible, streaming + memory-mapped)
-- Git blob format with zlib compression
-- Git tree format with deterministic serialization
-- `.tl/` repository initialization
-- Atomic write operations (fsync guarantees)
-
-**Phase 2: File System Watcher** ✅ Complete
-- Platform abstraction (macOS FSEvents, Linux inotify)
-- Per-path debouncing with configurable windows
-- Event coalescing and deduplication
-- Overflow recovery with targeted mtime-based rescan
-- Cross-platform compatibility testing
-
-**Phase 3: Checkpoint Journal** ✅ Complete
-- ✅ Checkpoint data structures (ULID IDs, metadata)
-- ✅ Sled-backed append-only journal
-- ✅ PathMap persistence with crash recovery
-- ✅ Incremental update algorithm with double-stat verification
-- ✅ Retention policies and garbage collection (mark & sweep)
-- ✅ Comprehensive test coverage (23 unit tests + 3 integration tests)
-
-**Phase 4: CLI & Daemon** ✅ Complete
-- ✅ Repository initialization (`tl init`) with git/JJ auto-setup
-- ✅ Diagnostic reporting (`tl info`, `tl status`)
-- ✅ Daemon process management (start/stop with graceful shutdown)
-- ✅ IPC via Unix domain sockets (bincode protocol)
-- ✅ All 13 commands implemented (status, log, diff, restore, pin, unpin, gc, etc.)
-- ✅ Background daemon with event loop and signal handling
-- ✅ **Unified data access architecture** (IPC-first with automatic fallback)
-- ✅ **Short checkpoint ID support** (4+ chars: `01KE5RWS`)
-- ✅ **Zero lock conflicts** (all commands work with daemon running)
-- ✅ **GC race condition fixed** (safe daemon stop/restart)
-- ✅ Comprehensive test coverage (14 integration tests + 12 E2E tests)
-
-**Phase 5: JJ Integration** ✅ Complete (JJ CLI-based approach)
-- ✅ Enhanced init command with automatic git/JJ initialization
-- ✅ Git detection and configuration utilities
-- ✅ JJ initialization helpers (colocated and external modes)
-- ✅ Commit message formatting with tests
-- ✅ Checkpoint materialization as JJ commits via `jj` CLI (publish command)
-- ✅ Bidirectional mapping (checkpoint ↔ JJ commit ID)
-- ✅ Remote sync operations (publish, push, pull) via `jj git push/pull`
-- ✅ Enhanced error handling with actionable messages
-- ✅ Comprehensive test coverage (24 JJ-specific unit tests)
-- ✅ Full user documentation (JJ Integration Guide)
-- ⚠️ Uses `jj` CLI commands (not pure jj-lib) - this is production-ready
-
-**Phase 6: Worktree Support** ✅ Complete
-- ✅ Workspace state management (sled database)
-- ✅ All workspace commands (list/add/switch/remove)
-- ✅ Auto-checkpoint on switch with deduplication
-- ✅ GC protection for workspace checkpoints
-- ✅ 24 unit tests passing
-
-### Roadmap to v1.0
-
-**Current Status:** 🚧 90% Complete - Phase 7 Pending (Production Hardening)
-
-**Completed (Phases 1-6):**
-- ✅ All core storage primitives (Phase 1)
-- ✅ File system watcher with cross-platform support (Phase 2)
-- ✅ Incremental update algorithm and checkpoint journal (Phase 3)
-- ✅ Full CLI suite (13 commands) and background daemon (Phase 4)
-- ✅ JJ integration with Git interoperability via `jj` CLI (Phase 5)
-- ✅ Worktree support with workspace management (Phase 6)
-
-**Phase 7: Production Hardening & Git Compatibility** (63.5 hours remaining)
-- [ ] Documentation fixes (honest fidelity guarantees)
-- [ ] Critical correctness (double-stat verification, periodic reconciliation)
-- [ ] Edge case handling (symlink/permission tracking, .gitignore/.tlignore)
-- [ ] True Git compatibility (SHA-1, Git object format, dual storage mode)
-- [ ] Comprehensive testing (200+ tests total)
-
-**Success criteria:** ✅ 8/10 Met, 2 Pending
-- ✅ All CLI commands functional (13 commands)
-- ✅ < 10ms checkpoint creation
-- ✅ Byte-identical restoration
-- ✅ Crash recovery guarantees
-- ✅ Retention policies with pinned checkpoints
-- ✅ JJ integration (publish, push, pull via CLI)
-- ✅ Worktree management (list/add/switch/remove)
-- ✅ Cross-platform support (macOS, Linux)
-- [ ] Production hardening (double-stat, reconciliation, integrity checks)
-- [ ] Full Git compatibility (optional Git mode with SHA-1/Git format)
-
 ---
 
 ## Usage
@@ -488,7 +402,7 @@ Timelapse is implemented as a Rust workspace with five crates:
 
 ```bash
 # From source (recommended for current development version)
-cargo install --git https://github.com/yourusername/timelapse --bin tl
+cargo install --git https://github.com/saint0x/tl --bin tl
 ```
 
 **Prerequisites**:
@@ -562,14 +476,32 @@ See [JJ Integration Guide](docs/jj-integration.md) for complete documentation.
 
 ### Configuration
 
+**Ignore Patterns:**
+
+Timelapse automatically ignores common editor temp files and build directories:
+- **Editor files**: `.swp`, `~`, `#*#`, `.#*` (Vim, Emacs)
+- **IDE directories**: `.vscode/`, `.idea/`, `*.iml`
+- **System files**: `.DS_Store`, `._*`, `Thumbs.db`
+- **Build directories**: `node_modules/`, `target/`, `__pycache__/`, `.venv/`
+- **VCS directories**: `.tl/`, `.git/`, `.jj/`
+
+**Custom ignore patterns** via `.tlignore` (gitignore syntax):
+```bash
+# .tlignore (created by tl init)
+# Project-specific ignore patterns
+/build/
+/dist/
+*.log
+```
+
+**Configuration file:**
 ```bash
 # .tl/config (TOML format)
 [watcher]
 debounce_ms = 300           # Per-path debounce window
-ignore_patterns = [         # Paths to exclude
-  "node_modules/**",
-  "target/**",
-  "*.log"
+ignore_patterns = [         # Additional paths to exclude
+  "*.tmp",
+  "cache/**"
 ]
 
 [retention]
@@ -705,34 +637,6 @@ struct Checkpoint {
 3. **Journal corruption**: Append-only log enables reconstruction from valid prefix
 4. **Disk full**: Graceful degradation (stop creating checkpoints, preserve existing)
 
-### Capture Fidelity Guarantees
-
-**What's Guaranteed (Always True):**
-- ✅ Every **stable** file state is captured (after debounce period)
-- ✅ Overflow events trigger automatic targeted reconciliation
-- ✅ Atomic save patterns correctly detected (10+ editors: Vim, Emacs, VS Code, etc.)
-- ✅ No data corruption (all writes are atomic with fsync)
-- ✅ Crash recovery without data loss (append-only journal)
-
-**High Success Rate (Best-Effort):**
-- ⚠️ Sub-300ms rapid edits may be coalesced into single checkpoint
-- ⚠️ Watcher events are eventually consistent (reconciled via overflow recovery)
-- ⚠️ Mid-write reads prevented via time-based debouncing (300ms default)
-- ⚠️ Network filesystems may have platform-specific quirks
-
-**Not Currently Tracked:**
-- ❌ Symlink target changes (symlinks stored but not monitored for changes)
-- ❌ Executable bit changes independent of content (generic metadata events only)
-- ❌ Extended attributes (xattrs) - explicitly out of scope
-- ❌ Permission-only changes (mode stored but changes may be missed)
-
-**Phase 7 Enhancements (Planned):**
-- File stability verification (double-stat pattern)
-- Periodic reconciliation scans (5-minute intervals)
-- Symlink and permission change monitoring
-- Configurable ignore patterns (.gitignore/.tlignore parsing)
-
-**Recommendation:** For critical savepoints, use `tl pin <checkpoint> <name>` to ensure retention.
 
 ### Platform Support
 
@@ -767,7 +671,7 @@ Full dependency tree: `cargo tree --workspace`
 ### Building from Source
 
 ```bash
-git clone https://github.com/yourusername/timelapse
+git clone https://github.com/saint0x/tl
 cd timelapse
 cargo build --release --workspace
 ```
@@ -792,63 +696,7 @@ cargo bench --workspace
 cargo test --workspace --features proptest
 ```
 
-### Project Structure
-
-```
-timelapse/
-├── crates/
-│   ├── core/          # Content-addressed storage primitives
-│   │   ├── src/
-│   │   │   ├── hash.rs       # SHA-1 hashing (Git-compatible)
-│   │   │   ├── blob.rs       # Git blob format with zlib compression
-│   │   │   ├── tree.rs       # Git tree format and diffing
-│   │   │   └── store.rs      # .tl/ directory management
-│   │   ├── benches/          # Criterion benchmarks
-│   │   └── tests/            # 72 unit tests
-│   │
-│   ├── watcher/       # File system event monitoring
-│   │   ├── src/
-│   │   │   ├── platform/     # FSEvents, inotify backends
-│   │   │   ├── debounce.rs   # Per-path debouncing
-│   │   │   ├── coalesce.rs   # Event deduplication
-│   │   │   └── overflow.rs   # Buffer overflow recovery
-│   │   └── tests/            # 43 unit tests
-│   │
-│   ├── journal/       # Checkpoint management (⏳ in progress)
-│   │   ├── src/
-│   │   │   ├── checkpoint.rs     # Data structures
-│   │   │   ├── journal.rs        # Sled database wrapper
-│   │   │   ├── pathmap.rs        # State cache (TODO)
-│   │   │   ├── incremental.rs    # Update algorithm (TODO)
-│   │   │   └── retention.rs      # GC policies (TODO)
-│   │
-│   ├── cli/           # User interface (⏳ in progress)
-│   │   ├── src/
-│   │   │   ├── main.rs           # Argument parsing
-│   │   │   ├── cmd/init.rs       # ✅ Implemented
-│   │   │   ├── cmd/info.rs       # ✅ Implemented
-│   │   │   └── cmd/*.rs          # ⏳ 10 commands TODO
-│   │
-│   └── jj/            # Jujutsu integration (⏹️ planned)
-│       ├── src/
-│       │   ├── materialize.rs    # Checkpoint → JJ commit
-│       │   └── mapping.rs        # Bidirectional sync
-│
-├── docs/              # Documentation
-│   ├── PLAN.md        # 632-line architectural design
-│   ├── STATUS.md      # 247-line implementation tracking
-│   └── plan-ascending/0-INDEX.md  # Phase breakdown
-│
-└── Cargo.toml         # Workspace manifest
-```
-
 ### Contributing Guidelines
-
-**Priority areas**:
-1. Phase 3 implementation (incremental updater, PathMap, GC)
-2. Windows watcher backend
-3. Performance optimization (profiling welcome)
-4. Documentation improvements
 
 **Contribution process**:
 1. Open issue for discussion (especially for architectural changes)
