@@ -139,6 +139,17 @@ pub async fn run(
                 println!("  {}", err.dimmed());
             }
         }
+
+        // CRITICAL (Fix 12): Invalidate pathmap after modifying working directory
+        // The daemon's in-memory pathmap is now stale and needs to be rebuilt
+        let socket_path = tl_dir.join("state/daemon.sock");
+        if socket_path.exists() {
+            if let Ok(mut client) = crate::ipc::IpcClient::connect(&socket_path).await {
+                if let Err(e) = client.invalidate_pathmap().await {
+                    tracing::warn!("Failed to invalidate pathmap after pull: {}", e);
+                }
+            }
+        }
     }
 
     // 10. Re-apply stash if we had uncommitted changes

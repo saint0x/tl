@@ -17,6 +17,7 @@ use anyhow::Result;
 use dashmap::DashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 /// Configuration for the file system watcher
@@ -176,6 +177,80 @@ pub enum ModifyKind {
     Any,
 }
 
+// =============================================================================
+// Watcher Metrics (Fix 15)
+// =============================================================================
+
+/// Metrics for watcher operations
+///
+/// Tracks overflow events and recovery statistics for monitoring
+/// and debugging file system watcher behavior.
+#[derive(Debug, Default)]
+pub struct WatcherMetrics {
+    /// Total number of overflow events detected
+    overflow_count: AtomicU64,
+
+    /// Number of paths recovered from overflow events
+    recovered_paths_total: AtomicU64,
+
+    /// Total events processed
+    events_processed: AtomicU64,
+}
+
+impl WatcherMetrics {
+    /// Create new metrics
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record an overflow event
+    pub fn record_overflow(&self) {
+        self.overflow_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record recovered paths count
+    pub fn record_recovery(&self, path_count: u64) {
+        self.recovered_paths_total.fetch_add(path_count, Ordering::Relaxed);
+    }
+
+    /// Record event processed
+    pub fn record_event(&self) {
+        self.events_processed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Get total overflow count
+    pub fn overflow_count(&self) -> u64 {
+        self.overflow_count.load(Ordering::Relaxed)
+    }
+
+    /// Get total recovered paths
+    pub fn recovered_paths_total(&self) -> u64 {
+        self.recovered_paths_total.load(Ordering::Relaxed)
+    }
+
+    /// Get total events processed
+    pub fn events_processed(&self) -> u64 {
+        self.events_processed.load(Ordering::Relaxed)
+    }
+
+    /// Get snapshot of all metrics
+    pub fn snapshot(&self) -> WatcherMetricsSnapshot {
+        WatcherMetricsSnapshot {
+            overflow_count: self.overflow_count(),
+            recovered_paths_total: self.recovered_paths_total(),
+            events_processed: self.events_processed(),
+        }
+    }
+}
+
+/// Snapshot of watcher metrics at a point in time
+#[derive(Debug, Clone, Copy)]
+pub struct WatcherMetricsSnapshot {
+    pub overflow_count: u64,
+    pub recovered_paths_total: u64,
+    pub events_processed: u64,
+}
+
 /// File system watcher coordinator
 ///
 /// Orchestrates the event pipeline:
@@ -204,6 +279,9 @@ pub struct Watcher {
 
     /// Running state
     is_running: bool,
+
+    /// Watcher metrics (Fix 15)
+    metrics: WatcherMetrics,
 }
 
 impl Watcher {
@@ -236,6 +314,7 @@ impl Watcher {
             debouncer,
             overflow_recovery,
             is_running: false,
+            metrics: WatcherMetrics::new(),
         })
     }
 
@@ -252,6 +331,14 @@ impl Watcher {
     /// Get a reference to the path interner
     pub fn interner(&self) -> &Arc<PathInterner> {
         &self.interner
+    }
+
+    /// Get watcher metrics (Fix 15)
+    ///
+    /// Returns metrics about watcher operations including overflow events,
+    /// recovered paths, and total events processed.
+    pub fn metrics(&self) -> &WatcherMetrics {
+        &self.metrics
     }
 
     /// Start watching for events
@@ -308,13 +395,29 @@ impl Watcher {
 
         // Check for overflow
         if watcher.has_overflow() {
+            // Record overflow metric (Fix 15)
+            self.metrics.record_overflow();
+            tracing::warn!(
+                "Watcher overflow detected (total: {})",
+                self.metrics.overflow_count()
+            );
+
             // Perform targeted recovery
             let recovered_paths = self.overflow_recovery.recover()?;
+            let recovered_count = recovered_paths.len();
 
             // Feed recovered paths to debouncer
             for path in recovered_paths {
                 self.debouncer.push(path);
             }
+
+            // Record recovery metric (Fix 15)
+            self.metrics.record_recovery(recovered_count as u64);
+            tracing::info!(
+                "Overflow recovery: {} paths recovered (total: {})",
+                recovered_count,
+                self.metrics.recovered_paths_total()
+            );
 
             // Reset overflow flag
             watcher.reset_overflow();
@@ -324,6 +427,9 @@ impl Watcher {
         let mut processed_any = false;
         while let Some(event) = watcher.poll_event().await? {
             processed_any = true;
+
+            // Record event processed metric (Fix 15)
+            self.metrics.record_event();
 
             // Handle overflow events
             if matches!(event.kind, EventKind::Overflow) {

@@ -126,6 +126,29 @@ pub async fn run(checkpoint: &str, skip_confirm: bool) -> Result<()> {
     }
 
     println!();
+
+    // CRITICAL (Fix 12): Invalidate the daemon's pathmap after restore
+    // The daemon's in-memory pathmap is now stale because we've modified
+    // the working directory. It needs to rebuild from the checkpoint we
+    // just restored to (or HEAD) to avoid capturing incorrect changes.
+    let socket_path = tl_dir.join("state/daemon.sock");
+    if socket_path.exists() {
+        match crate::ipc::IpcClient::connect(&socket_path).await {
+            Ok(mut client) => {
+                if let Err(e) = client.invalidate_pathmap().await {
+                    // Non-fatal - daemon will handle stale pathmap on next checkpoint
+                    tracing::warn!("Failed to invalidate pathmap: {}", e);
+                } else {
+                    tracing::debug!("Pathmap invalidation requested");
+                }
+            }
+            Err(e) => {
+                // Daemon might not be running - that's OK
+                tracing::debug!("Could not connect to daemon to invalidate pathmap: {}", e);
+            }
+        }
+    }
+
     println!("{}", "Note: The daemon will automatically create a new checkpoint reflecting these changes.".dimmed());
 
     Ok(())

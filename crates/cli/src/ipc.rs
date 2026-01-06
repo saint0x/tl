@@ -44,6 +44,9 @@ pub enum IpcRequest {
     ResolveCheckpointRefs(Vec<String>),
     /// Get repository info (checkpoint IDs, storage stats)
     GetInfoData,
+    /// Invalidate pathmap (after restore operation modifies working directory)
+    /// Daemon will rebuild pathmap from HEAD checkpoint on next checkpoint cycle
+    InvalidatePathmap,
 }
 
 /// IPC response from daemon to CLI
@@ -190,6 +193,15 @@ impl IpcClient {
             IpcResponse::Ok => Ok(()),
             IpcResponse::Error(err) => anyhow::bail!("Shutdown error: {}", err),
             _ => anyhow::bail!("Unexpected response to Shutdown"),
+        }
+    }
+
+    /// Invalidate pathmap (after restore modifies working directory)
+    pub async fn invalidate_pathmap(&mut self) -> Result<()> {
+        match self.send_request(&IpcRequest::InvalidatePathmap).await? {
+            IpcResponse::Ok => Ok(()),
+            IpcResponse::Error(err) => anyhow::bail!("Invalidate pathmap error: {}", err),
+            _ => anyhow::bail!("Unexpected response to InvalidatePathmap"),
         }
     }
 

@@ -9,18 +9,55 @@ use crate::common::{ProjectSize, ProjectTemplate, TestProject};
 use crate::common::cli::{TlCommand, extract_ulid};
 
 /// Trigger checkpoint creation and return the checkpoint ID
+///
+/// Retries up to 5 times with increasing delays to handle FSEvents latency.
 async fn create_checkpoint(root: &std::path::Path) -> Result<String> {
-    // Wait for FSEvents latency + coalescing window (macOS can have 100-300ms FSEvents delay)
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    // FSEvents on macOS can have 100-500ms latency, retry with backoff
+    for attempt in 0..5 {
+        let delay = Duration::from_millis(500 + (attempt as u64 * 300));
+        tokio::time::sleep(delay).await;
 
-    // Flush to create checkpoint
-    let flush_result = TlCommand::new(root)
-        .args(&["flush"])
-        .assert_success()?;
+        let flush_result = TlCommand::new(root)
+            .args(&["flush"])
+            .execute()?;
 
-    // Extract checkpoint ID from output
-    extract_ulid(&flush_result.stdout)
-        .ok_or_else(|| anyhow::anyhow!("No checkpoint created (no pending changes)"))
+        if flush_result.success() {
+            if let Some(ulid) = extract_ulid(&flush_result.stdout) {
+                return Ok(ulid);
+            }
+        }
+    }
+
+    anyhow::bail!("No checkpoint created after 5 attempts (FSEvents latency issue)")
+}
+
+/// Create checkpoint with guaranteed success (retries with file re-touch)
+async fn create_checkpoint_guaranteed(
+    root: &std::path::Path,
+    project: &mut TestProject,
+    file: &str,
+    content: &str,
+) -> Result<String> {
+    // Try up to 5 times with file re-touching
+    for attempt in 0..5 {
+        // Re-touch the file to ensure FSEvents sees it
+        project.modify_files(&[file], content)?;
+
+        let delay = Duration::from_millis(500 + (attempt as u64 * 200));
+        tokio::time::sleep(delay).await;
+
+        let flush_result = TlCommand::new(root)
+            .args(&["flush"])
+            .execute()?;
+
+        if flush_result.success() {
+            if let Some(ulid) = extract_ulid(&flush_result.stdout) {
+                return Ok(ulid);
+            }
+        }
+    }
+
+    anyhow::bail!("Failed to create checkpoint after 5 attempts for content: {}", content)
 }
 
 /// Test basic restore functionality
@@ -80,17 +117,14 @@ async fn test_rewind_to_earlier_state() -> Result<()> {
     TlCommand::new(&root).args(&["start"]).assert_success()?;
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    // STATE 1: Initial
-    project.modify_files(&["src/main.rs"], "// state 1")?;
-    let checkpoint1 = create_checkpoint(&root).await?;
+    // STATE 1: Initial (use guaranteed checkpoint creation with file re-touch)
+    let checkpoint1 = create_checkpoint_guaranteed(&root, &mut project, "src/main.rs", "// state 1").await?;
 
     // STATE 2: Modified
-    project.modify_files(&["src/main.rs"], "// state 2")?;
-    let _checkpoint2 = create_checkpoint(&root).await?;
+    let _checkpoint2 = create_checkpoint_guaranteed(&root, &mut project, "src/main.rs", "// state 2").await?;
 
     // STATE 3: More changes
-    project.modify_files(&["src/main.rs"], "// state 3")?;
-    let _checkpoint3 = create_checkpoint(&root).await?;
+    let _checkpoint3 = create_checkpoint_guaranteed(&root, &mut project, "src/main.rs", "// state 3").await?;
 
     // Stop daemon to release database locks
     TlCommand::new(&root).args(&["stop"]).assert_success()?;

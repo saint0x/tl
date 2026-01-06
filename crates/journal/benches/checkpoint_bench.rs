@@ -4,12 +4,12 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
 use journal::{Checkpoint, CheckpointMeta, CheckpointReason, Journal, PathMap};
-use core::{Blake3Hash, Entry, Store, Tree, hash::hash_bytes};
+use core::{Sha1Hash, Entry, Tree};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
 fn bench_checkpoint_serialization(c: &mut Criterion) {
-    let root_tree = Blake3Hash::from_bytes([1u8; 32]);
+    let root_tree = Sha1Hash::from_bytes([1u8; 20]);
     let meta = CheckpointMeta {
         files_changed: 10,
         bytes_added: 1024,
@@ -44,7 +44,7 @@ fn bench_journal_append(c: &mut Criterion) {
     let temp_dir = TempDir::new().unwrap();
     let journal = Journal::open(temp_dir.path()).unwrap();
 
-    let root_tree = Blake3Hash::from_bytes([2u8; 32]);
+    let root_tree = Sha1Hash::from_bytes([2u8; 20]);
     let meta = CheckpointMeta {
         files_changed: 1,
         bytes_added: 100,
@@ -73,7 +73,7 @@ fn bench_journal_queries(c: &mut Criterion) {
     // Populate journal with checkpoints
     let mut checkpoint_ids = Vec::new();
     for i in 0..1000 {
-        let root_tree = Blake3Hash::from_bytes([i as u8; 32]);
+        let root_tree = Sha1Hash::from_bytes([i as u8; 20]);
         let meta = CheckpointMeta {
             files_changed: 1,
             bytes_added: 100,
@@ -107,13 +107,13 @@ fn bench_journal_queries(c: &mut Criterion) {
 }
 
 fn bench_pathmap_operations(c: &mut Criterion) {
-    let root_tree = Blake3Hash::from_bytes([3u8; 32]);
+    let root_tree = Sha1Hash::from_bytes([3u8; 20]);
     let mut pathmap = PathMap::new(root_tree);
 
     // Populate with entries
     for i in 0..100 {
         let path = PathBuf::from(format!("file{}.txt", i));
-        let hash = hash_bytes(format!("content{}", i).as_bytes());
+        let hash = Sha1Hash::from_bytes([(i % 256) as u8; 20]);
         let entry = Entry::file(0o644, hash);
         pathmap.update(&path, Some(entry));
     }
@@ -145,7 +145,7 @@ fn bench_tree_operations(c: &mut Criterion) {
 
         for i in 0..size {
             let path = PathBuf::from(format!("file{}.txt", i));
-            let hash = hash_bytes(format!("content{}", i).as_bytes());
+            let hash = Sha1Hash::from_bytes([(i % 256) as u8; 20]);
             let entry = Entry::file(0o644, hash);
             tree.insert(&path, entry);
         }

@@ -150,6 +150,22 @@ impl Daemon {
                         continue;
                     }
 
+                    // Check if pathmap needs rebuild (after restore operation)
+                    let stale_marker = tl_dir.join("state/pathmap_stale");
+                    if stale_marker.exists() {
+                        tracing::info!("Pathmap marked stale - rebuilding from HEAD");
+                        match rebuild_pathmap_from_head(&tl_dir, &self.journal, &self.store) {
+                            Ok(new_pathmap) => {
+                                self.pathmap = new_pathmap;
+                                let _ = std::fs::remove_file(&stale_marker);
+                                tracing::info!("Pathmap rebuilt successfully");
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to rebuild pathmap: {}", e);
+                            }
+                        }
+                    }
+
                     tracing::info!("Creating checkpoint for {} paths", pending_paths.len());
 
                     match self.create_checkpoint(&pending_paths).await {
@@ -505,6 +521,19 @@ impl Daemon {
                                 IpcRequest::Shutdown => {
                                     // Signal shutdown
                                     let _ = shutdown_tx.send(());
+                                    Ok(IpcResponse::Ok)
+                                }
+                                IpcRequest::InvalidatePathmap => {
+                                    // Mark pathmap as needing rebuild
+                                    // This is called after restore operations modify the working directory
+                                    tracing::info!("Pathmap invalidation requested - will rebuild from HEAD");
+
+                                    // Write a marker file that the daemon checks on next checkpoint
+                                    let marker_path = store.tl_dir().join("state/pathmap_stale");
+                                    if let Err(e) = std::fs::write(&marker_path, "stale") {
+                                        return Ok(IpcResponse::Error(format!("Failed to mark pathmap stale: {}", e)));
+                                    }
+
                                     Ok(IpcResponse::Ok)
                                 }
                             }
@@ -997,4 +1026,43 @@ fn clear_pending_paths(tl_dir: &Path) {
     if file_path.exists() {
         let _ = std::fs::remove_file(&file_path);
     }
+}
+
+// =============================================================================
+// Pathmap Rebuild (Fix 12)
+// =============================================================================
+
+/// Rebuild pathmap from HEAD checkpoint after restore operation
+///
+/// CRITICAL: After a restore operation modifies the working directory,
+/// the in-memory pathmap becomes stale. This function rebuilds it from
+/// the HEAD checkpoint's tree to ensure subsequent checkpoints correctly
+/// capture only actual changes.
+fn rebuild_pathmap_from_head(
+    tl_dir: &Path,
+    journal: &Journal,
+    store: &Store,
+) -> Result<PathMap> {
+    // Get latest checkpoint
+    let head = journal.latest()?.ok_or_else(|| {
+        anyhow::anyhow!("No checkpoint exists - cannot rebuild pathmap")
+    })?;
+
+    // Load the tree for HEAD checkpoint
+    let tree = store.read_tree(head.root_tree)?;
+
+    // Create new PathMap from tree
+    let new_pathmap = PathMap::from_tree(&tree, head.root_tree);
+
+    // Save the rebuilt pathmap to disk
+    let pathmap_path = tl_dir.join("state/pathmap.bin");
+    new_pathmap.save(&pathmap_path)?;
+
+    tracing::info!(
+        "Rebuilt pathmap from HEAD checkpoint {} ({} entries)",
+        head.id,
+        new_pathmap.len()
+    );
+
+    Ok(new_pathmap)
 }

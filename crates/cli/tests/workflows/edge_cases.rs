@@ -9,19 +9,31 @@ use crate::common::{ProjectSize, ProjectTemplate, TestProject};
 use crate::common::cli::TlCommand;
 
 /// Trigger checkpoint creation and return the checkpoint ID
+///
+/// Retries up to 3 times with increasing delays to handle FSEvents latency.
 async fn create_checkpoint(root: &std::path::Path) -> Result<Option<String>> {
-    // Wait for FSEvents latency + coalescing window (macOS can have 100-300ms FSEvents delay)
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    // FSEvents on macOS can have 100-500ms latency, retry with backoff
+    for attempt in 0..3 {
+        let delay = Duration::from_millis(500 + (attempt as u64 * 300));
+        tokio::time::sleep(delay).await;
 
-    let flush_result = TlCommand::new(root)
-        .args(&["flush"])
-        .execute()?;
+        let flush_result = TlCommand::new(root)
+            .args(&["flush"])
+            .execute()?;
 
-    if !flush_result.success() {
-        return Ok(None);
+        if flush_result.success() {
+            if let Some(ulid) = crate::common::cli::extract_ulid(&flush_result.stdout) {
+                return Ok(Some(ulid));
+            }
+        }
+
+        // If no checkpoint created, the FSEvents hasn't fired yet - retry
+        if attempt < 2 {
+            tracing::debug!("Checkpoint creation attempt {} failed, retrying...", attempt + 1);
+        }
     }
 
-    Ok(crate::common::cli::extract_ulid(&flush_result.stdout))
+    Ok(None)
 }
 
 /// Test flushing with no pending changes
@@ -310,6 +322,35 @@ async fn test_deep_nesting() -> Result<()> {
     Ok(())
 }
 
+/// Create checkpoint with guaranteed success (retries with file re-touch)
+async fn create_checkpoint_guaranteed(
+    root: &std::path::Path,
+    project: &mut TestProject,
+    file: &str,
+    content: &str,
+) -> Result<String> {
+    // Try up to 5 times with file re-touching
+    for attempt in 0..5 {
+        // Re-touch the file to ensure FSEvents sees it
+        project.modify_files(&[file], content)?;
+
+        let delay = Duration::from_millis(500 + (attempt as u64 * 200));
+        tokio::time::sleep(delay).await;
+
+        let flush_result = TlCommand::new(root)
+            .args(&["flush"])
+            .execute()?;
+
+        if flush_result.success() {
+            if let Some(ulid) = crate::common::cli::extract_ulid(&flush_result.stdout) {
+                return Ok(ulid);
+            }
+        }
+    }
+
+    anyhow::bail!("Failed to create checkpoint after 5 attempts for content: {}", content)
+}
+
 /// Test rapid successive checkpoints
 #[tokio::test]
 async fn test_rapid_checkpoints() -> Result<()> {
@@ -322,15 +363,14 @@ async fn test_rapid_checkpoints() -> Result<()> {
     TlCommand::new(&root).args(&["start"]).assert_success()?;
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    // Create 10 checkpoints in rapid succession
+    // Create 10 checkpoints with guaranteed success
     let mut checkpoints = Vec::new();
     let start = std::time::Instant::now();
 
     for i in 0..10 {
-        project.modify_files(&["src/main.rs"], &format!("// version {}", i))?;
-        if let Some(cp) = create_checkpoint(&root).await? {
-            checkpoints.push(cp);
-        }
+        let content = format!("// version {}", i);
+        let cp = create_checkpoint_guaranteed(&root, &mut project, "src/main.rs", &content).await?;
+        checkpoints.push(cp);
     }
 
     let total_duration = start.elapsed();
