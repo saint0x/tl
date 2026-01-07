@@ -6,4 +6,5 @@ pub mod data_access;
 pub mod diff_utils;
 pub mod ipc;
 pub mod locks;
+pub mod system_config;
 pub mod util;

@@ -1,11 +1,17 @@
 //! Daemon lifecycle management
+//!
+//! The daemon handles:
+//! - File system watching and checkpoint creation
+//! - Auto-GC based on configurable intervals and thresholds
+//! - IPC communication with CLI commands
 
 use crate::ipc::{handle_connection, DaemonStatus, IpcRequest, IpcResponse, IpcServer};
-use crate::locks::{DaemonLock, RestoreLock};
+use crate::locks::{DaemonLock, RestoreLock, GcLock};
+use crate::system_config::{self, SystemConfig};
 use crate::util;
 use anyhow::{Context, Result};
 use tl_core::store::Store;
-use journal::{incremental_update, Checkpoint, CheckpointMeta, CheckpointReason, Journal, PathMap};
+use journal::{incremental_update, Checkpoint, CheckpointMeta, CheckpointReason, GarbageCollector, Journal, PathMap, PinManager};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -100,6 +106,9 @@ pub struct Daemon {
 
     // Performance caching
     checkpoint_count_cache: Arc<AtomicUsize>,
+
+    // System configuration (for auto-GC)
+    system_config: SystemConfig,
 }
 
 impl Daemon {
@@ -115,9 +124,23 @@ impl Daemon {
         let tl_dir = self.store.tl_dir().to_path_buf();
         let mut pending_paths: HashSet<Arc<Path>> = load_pending_paths(&tl_dir);
         let mut last_checkpoint = Instant::now();
-        let checkpoint_interval = Duration::from_secs(5); // Create checkpoint every 5s
+        let checkpoint_interval = Duration::from_secs(self.system_config.daemon.checkpoint_interval_secs);
         let mut last_pending_save = Instant::now();
         let pending_save_interval = Duration::from_secs(2); // Save pending paths every 2s
+
+        // Auto-GC state
+        let mut last_gc = Instant::now();
+        let gc_interval = Duration::from_secs(self.system_config.daemon.auto_gc_interval_secs);
+        let gc_threshold = self.system_config.daemon.auto_gc_checkpoint_threshold;
+        let auto_gc_enabled = self.system_config.daemon.auto_gc_enabled;
+
+        if auto_gc_enabled {
+            tracing::info!(
+                "Auto-GC enabled: interval={}s, threshold={} checkpoints",
+                self.system_config.daemon.auto_gc_interval_secs,
+                gc_threshold
+            );
+        }
 
         loop {
             tokio::select! {
@@ -234,6 +257,40 @@ impl Daemon {
 
                     // Send result back to IPC handler (ignore if receiver dropped)
                     let _ = response_tx.send(result);
+                }
+
+                // Auto-GC check (runs periodically)
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(last_gc + gc_interval)), if auto_gc_enabled => {
+                    let checkpoint_count = self.checkpoint_count_cache.load(Ordering::Relaxed);
+                    let should_gc = checkpoint_count > gc_threshold;
+
+                    if should_gc {
+                        tracing::info!(
+                            "Auto-GC triggered: {} checkpoints (threshold: {})",
+                            checkpoint_count,
+                            gc_threshold
+                        );
+
+                        // Run GC in background to avoid blocking the event loop
+                        let tl_dir_clone = tl_dir.clone();
+                        let store_clone = Arc::clone(&self.store);
+                        let system_config_clone = self.system_config.clone();
+                        let checkpoint_count_cache = Arc::clone(&self.checkpoint_count_cache);
+
+                        tokio::spawn(async move {
+                            if let Err(e) = run_auto_gc(&tl_dir_clone, &store_clone, &system_config_clone, checkpoint_count_cache).await {
+                                tracing::error!("Auto-GC failed: {}", e);
+                            }
+                        });
+                    } else {
+                        tracing::debug!(
+                            "Auto-GC check: {} checkpoints (threshold: {}), skipping",
+                            checkpoint_count,
+                            gc_threshold
+                        );
+                    }
+
+                    last_gc = Instant::now();
                 }
 
                 // Handle IPC connections
@@ -745,6 +802,12 @@ pub async fn start(supervised: bool) -> Result<()> {
 async fn start_daemon_direct(repo_root: &Path) -> Result<()> {
     let tl_dir = repo_root.join(".tl");
 
+    // 1. Load system configuration (for auto-GC settings)
+    let system_config = system_config::load().unwrap_or_else(|e| {
+        tracing::warn!("Failed to load system config, using defaults: {}", e);
+        SystemConfig::default()
+    });
+
     // 2. Check if already running
     if is_running_impl(&tl_dir).await {
         anyhow::bail!("Daemon already running");
@@ -812,6 +875,7 @@ async fn start_daemon_direct(repo_root: &Path) -> Result<()> {
         flush_rx,
         status,
         checkpoint_count_cache,
+        system_config,
     };
 
     daemon.run().await?;
@@ -1065,4 +1129,95 @@ fn rebuild_pathmap_from_head(
     );
 
     Ok(new_pathmap)
+}
+
+// =============================================================================
+// Auto-GC (runs in background during daemon operation)
+// =============================================================================
+
+/// Run automatic garbage collection
+///
+/// This is called by the daemon when checkpoint count exceeds threshold.
+/// It runs in a spawned task to avoid blocking the main event loop.
+///
+/// SAFETY: Uses proper locking to ensure exclusive access during GC.
+async fn run_auto_gc(
+    tl_dir: &Path,
+    store: &Store,
+    config: &SystemConfig,
+    checkpoint_count_cache: Arc<AtomicUsize>,
+) -> Result<()> {
+    use std::time::Instant;
+
+    let start = Instant::now();
+    tracing::info!("Starting auto-GC...");
+
+    // Try to acquire GC lock - if we can't, another GC is running
+    let gc_lock = match GcLock::try_acquire(tl_dir) {
+        Ok(lock) => lock,
+        Err(e) => {
+            tracing::debug!("Auto-GC skipped - could not acquire lock: {}", e);
+            return Ok(());
+        }
+    };
+
+    // Open journal with write access (we hold the GC lock, so this is safe)
+    let journal_path = tl_dir.join("journal");
+    let journal = Journal::open(&journal_path)
+        .context("Failed to open journal for auto-GC")?;
+
+    // Collect workspace checkpoints for protection
+    let workspace_checkpoints = collect_workspace_checkpoints(tl_dir, store.root())?;
+
+    // Create GC with configured retention policy
+    let policy = config.gc.to_retention_policy();
+    let gc = GarbageCollector::new(policy);
+
+    // Create pin manager
+    let pin_manager = PinManager::new(tl_dir);
+
+    // Run GC
+    let metrics = gc.collect(&journal, store, &pin_manager, workspace_checkpoints.as_ref())?;
+
+    // Update checkpoint count cache
+    let new_count = journal.count();
+    checkpoint_count_cache.store(new_count, Ordering::Relaxed);
+
+    // Drop lock
+    drop(gc_lock);
+
+    let duration = start.elapsed();
+
+    if metrics.checkpoints_deleted > 0 || metrics.blobs_deleted > 0 {
+        tracing::info!(
+            "Auto-GC completed in {:?}: {} checkpoints, {} trees, {} blobs deleted ({:.2} MB freed)",
+            duration,
+            metrics.checkpoints_deleted,
+            metrics.trees_deleted,
+            metrics.blobs_deleted,
+            metrics.bytes_freed as f64 / (1024.0 * 1024.0)
+        );
+    } else {
+        tracing::debug!("Auto-GC completed in {:?}: no garbage found", duration);
+    }
+
+    Ok(())
+}
+
+/// Collect workspace checkpoints that should be protected from GC
+fn collect_workspace_checkpoints(tl_dir: &Path, repo_root: &Path) -> Result<Option<HashSet<Ulid>>> {
+    if jj::detect_jj_workspace(repo_root)?.is_none() {
+        return Ok(None);
+    }
+
+    let ws_manager = jj::WorkspaceManager::open(tl_dir, repo_root)?;
+    let mut checkpoints = HashSet::new();
+
+    for state in ws_manager.list_states()? {
+        if let Some(cp_id) = state.current_checkpoint {
+            checkpoints.insert(cp_id);
+        }
+    }
+
+    Ok(Some(checkpoints))
 }

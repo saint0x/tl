@@ -10,6 +10,7 @@ mod data_access;
 mod diff_utils;
 mod ipc;
 mod locks;
+mod system_config;
 mod util;
 
 /// Timelapse - Lossless checkpoint stream for your code

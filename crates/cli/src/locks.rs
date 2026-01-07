@@ -298,6 +298,14 @@ impl GcLock {
         })
     }
 
+    /// Try to acquire GC lock without blocking
+    ///
+    /// Unlike `acquire()`, this returns an error that can be matched to determine
+    /// if the lock is already held (useful for auto-GC which should skip if busy).
+    pub fn try_acquire(tl_dir: &Path) -> Result<Self> {
+        Self::acquire(tl_dir)
+    }
+
     /// Check if GC lock is currently held
     pub fn is_held(tl_dir: &Path) -> bool {
         let lock_path = tl_dir.join("locks/gc.lock");

@@ -1,13 +1,23 @@
 //! Run garbage collection
+//!
+//! GC retention policy is configurable via system config at ~/.config/tl/config.toml
+//!
+//! Example configuration:
+//! ```toml
+//! [gc]
+//! retain_count = 2000    # Number of checkpoints to keep
+//! retain_hours = 24      # Time window to keep all checkpoints
+//! retain_pins = true     # Always keep pinned checkpoints
+//! ```
 
 use crate::locks::GcLock;
+use crate::system_config;
 use crate::util;
 use anyhow::{Context, Result};
 use std::collections::HashSet;
 use tl_core::Store;
-use journal::{GarbageCollector, Journal, PinManager, RetentionPolicy};
+use journal::{GarbageCollector, Journal, PinManager};
 use owo_colors::OwoColorize;
-use ulid::Ulid;
 use std::time::Duration;
 
 pub async fn run() -> Result<()> {
@@ -66,9 +76,21 @@ pub async fn run() -> Result<()> {
         None
     };
 
-    // 5. Create GC with default retention policy
-    let policy = RetentionPolicy::default();
-    let gc = GarbageCollector::new(policy);
+    // 5. Load retention policy from system config
+    let system_config = system_config::load()
+        .unwrap_or_else(|e| {
+            tracing::warn!("Failed to load system config, using defaults: {}", e);
+            system_config::SystemConfig::default()
+        });
+    let policy = system_config.gc.to_retention_policy();
+    let gc = GarbageCollector::new(policy.clone());
+
+    // Show retention policy
+    println!("Retention policy:");
+    println!("  Keep last {} checkpoints", policy.retain_dense_count.to_string().cyan());
+    println!("  Keep all within {} hours", (policy.retain_dense_window_ms / 3600000).to_string().cyan());
+    println!("  Retain pins: {}", if policy.retain_pins { "yes".green().to_string() } else { "no".red().to_string() });
+    println!();
 
     println!("{}", "Running Garbage Collection...".bold());
     println!();
