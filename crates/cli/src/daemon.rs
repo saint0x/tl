@@ -170,6 +170,15 @@ impl Daemon {
                     // If so, skip this checkpoint cycle to prevent race conditions
                     if RestoreLock::is_held(&self.store.tl_dir()) {
                         tracing::info!("Skipping checkpoint - restore operation in progress");
+                        self.status.write().await.checkpoints_skipped += 1;
+                        continue;
+                    }
+
+                    // CRITICAL: Check if a GC operation is in progress
+                    // If so, skip this checkpoint cycle to prevent journal corruption
+                    if GcLock::is_held(&self.store.tl_dir()) {
+                        tracing::info!("Skipping checkpoint - garbage collection in progress");
+                        self.status.write().await.checkpoints_skipped += 1;
                         continue;
                     }
 
@@ -221,6 +230,15 @@ impl Daemon {
                     // Check for restore lock before flushing
                     if RestoreLock::is_held(&self.store.tl_dir()) {
                         tracing::warn!("Flush skipped - restore operation in progress");
+                        self.status.write().await.checkpoints_skipped += 1;
+                        let _ = response_tx.send(Ok(None));
+                        continue;
+                    }
+
+                    // Check for GC lock before flushing
+                    if GcLock::is_held(&self.store.tl_dir()) {
+                        tracing::warn!("Flush skipped - garbage collection in progress");
+                        self.status.write().await.checkpoints_skipped += 1;
                         let _ = response_tx.send(Ok(None));
                         continue;
                     }
@@ -849,6 +867,7 @@ async fn start_daemon_direct(repo_root: &Path) -> Result<()> {
         checkpoints_created: 0,
         last_checkpoint_time: None,
         watcher_paths: 0,
+        checkpoints_skipped: 0,
     }));
 
     // Initialize checkpoint count cache
@@ -1150,7 +1169,7 @@ async fn run_auto_gc(
     use std::time::Instant;
 
     let start = Instant::now();
-    tracing::info!("Starting auto-GC...");
+    tracing::info!("Starting auto-GC... (this will pause checkpoint creation)");
 
     // Try to acquire GC lock - if we can't, another GC is running
     let gc_lock = match GcLock::try_acquire(tl_dir) {
@@ -1177,6 +1196,8 @@ async fn run_auto_gc(
     let pin_manager = PinManager::new(tl_dir);
 
     // Run GC
+    // Note: GC is a blocking operation. In practice, it should complete in seconds,
+    // but we monitor via logging. The checkpoint pause is inherent to the safety model.
     let metrics = gc.collect(&journal, store, &pin_manager, workspace_checkpoints.as_ref())?;
 
     // Update checkpoint count cache

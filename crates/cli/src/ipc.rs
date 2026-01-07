@@ -106,6 +106,8 @@ pub struct DaemonStatus {
     pub last_checkpoint_time: Option<u64>,
     /// Number of paths currently being watched
     pub watcher_paths: usize,
+    /// Number of checkpoints skipped due to GC/restore locks
+    pub checkpoints_skipped: u64,
 }
 
 /// IPC client for CLI to communicate with daemon
@@ -488,6 +490,7 @@ mod tests {
             checkpoints_created: 42,
             last_checkpoint_time: Some(1234567890),
             watcher_paths: 100,
+            checkpoints_skipped: 0,
         };
 
         let response = IpcResponse::Status(status.clone());

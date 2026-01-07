@@ -43,6 +43,8 @@ pub struct DaemonConfig {
 
     /// Auto-GC interval in seconds (default: 3600 = 1 hour)
     /// GC runs when checkpoint count exceeds threshold OR interval has passed
+    /// NOTE: During auto-GC (typically 2-10s), checkpoint creation is paused
+    ///       to prevent journal corruption. Pending file changes are queued.
     pub auto_gc_interval_secs: u64,
 
     /// Auto-GC checkpoint threshold (default: 5000)
@@ -93,6 +95,93 @@ impl GcConfig {
             retain_dense_window_ms: self.retain_hours * 60 * 60 * 1000, // hours to ms
             retain_pins: self.retain_pins,
         }
+    }
+
+    /// Validate GC configuration
+    pub fn validate(&self) -> Result<()> {
+        // retain_count: 10-1,000,000
+        if self.retain_count < 10 {
+            anyhow::bail!(
+                "retain_count too small: {} (minimum: 10 to prevent data loss)",
+                self.retain_count
+            );
+        }
+        if self.retain_count > 1_000_000 {
+            anyhow::bail!(
+                "retain_count too large: {} (maximum: 1,000,000)",
+                self.retain_count
+            );
+        }
+
+        // retain_hours: 0-8760 (0 is valid - no time-based retention)
+        if self.retain_hours > 8760 {
+            anyhow::bail!(
+                "retain_hours too large: {} (maximum: 8760 = 1 year)",
+                self.retain_hours
+            );
+        }
+
+        Ok(())
+    }
+}
+
+impl DaemonConfig {
+    /// Validate daemon configuration
+    pub fn validate(&self) -> Result<()> {
+        // checkpoint_interval_secs: 1-3600
+        if self.checkpoint_interval_secs == 0 {
+            anyhow::bail!("checkpoint_interval_secs cannot be 0 (minimum: 1)");
+        }
+        if self.checkpoint_interval_secs > 3600 {
+            anyhow::bail!(
+                "checkpoint_interval_secs too large: {} (maximum: 3600 = 1 hour)",
+                self.checkpoint_interval_secs
+            );
+        }
+
+        // auto_gc_interval_secs: 60-86400
+        if self.auto_gc_interval_secs < 60 {
+            anyhow::bail!(
+                "auto_gc_interval_secs too small: {} (minimum: 60 = 1 minute)",
+                self.auto_gc_interval_secs
+            );
+        }
+        if self.auto_gc_interval_secs > 86400 {
+            anyhow::bail!(
+                "auto_gc_interval_secs too large: {} (maximum: 86400 = 24 hours)",
+                self.auto_gc_interval_secs
+            );
+        }
+
+        // auto_gc_checkpoint_threshold: 100-100,000
+        if self.auto_gc_checkpoint_threshold < 100 {
+            anyhow::bail!(
+                "auto_gc_checkpoint_threshold too small: {} (minimum: 100)",
+                self.auto_gc_checkpoint_threshold
+            );
+        }
+        if self.auto_gc_checkpoint_threshold > 100_000 {
+            anyhow::bail!(
+                "auto_gc_checkpoint_threshold too large: {} (maximum: 100,000)",
+                self.auto_gc_checkpoint_threshold
+            );
+        }
+
+        Ok(())
+    }
+}
+
+impl SystemConfig {
+    /// Validate configuration values
+    ///
+    /// Returns Ok(()) if valid, Err with descriptive message if invalid.
+    /// This is called after deserialization to catch bad user configs.
+    pub fn validate(&self) -> Result<()> {
+        self.daemon.validate()
+            .context("Invalid daemon configuration")?;
+        self.gc.validate()
+            .context("Invalid GC configuration")?;
+        Ok(())
     }
 }
 
@@ -148,6 +237,16 @@ pub fn load() -> Result<SystemConfig> {
     let config: SystemConfig = toml::from_str(&content)
         .with_context(|| format!("Failed to parse system config at {}", config_path.display()))?;
 
+    // Validate configuration values
+    if let Err(e) = config.validate() {
+        tracing::warn!(
+            "Invalid system config at {} ({}), using defaults",
+            config_path.display(),
+            e
+        );
+        return Ok(SystemConfig::default());
+    }
+
     tracing::debug!("Loaded system config from {}", config_path.display());
     Ok(config)
 }
@@ -197,7 +296,14 @@ pub fn example_config() -> String {
     content.push_str("# Location: ~/.config/tl/config.toml\n");
     content.push_str("#\n");
     content.push_str("# This file configures system-wide Timelapse behavior.\n");
-    content.push_str("# Project-specific settings are in .tl/config.toml\n\n");
+    content.push_str("# Project-specific settings are in .tl/config.toml\n");
+    content.push_str("#\n");
+    content.push_str("# Valid ranges (values outside these will use defaults):\n");
+    content.push_str("#   checkpoint_interval_secs: 1-3600 (seconds)\n");
+    content.push_str("#   auto_gc_interval_secs: 60-86400 (seconds)\n");
+    content.push_str("#   auto_gc_checkpoint_threshold: 100-100,000\n");
+    content.push_str("#   retain_count: 10-1,000,000\n");
+    content.push_str("#   retain_hours: 0-8760 (0 = no time limit)\n\n");
 
     content.push_str(&toml::to_string_pretty(&config).unwrap_or_default());
     content
@@ -244,5 +350,215 @@ mod tests {
 
         assert_eq!(config.daemon.auto_gc_interval_secs, parsed.daemon.auto_gc_interval_secs);
         assert_eq!(config.gc.retain_count, parsed.gc.retain_count);
+    }
+
+    // ===== Validation Tests =====
+
+    #[test]
+    fn test_default_config_validates() {
+        let config = SystemConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_checkpoint_interval_zero() {
+        let config = DaemonConfig {
+            checkpoint_interval_secs: 0,
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("checkpoint_interval_secs cannot be 0"));
+    }
+
+    #[test]
+    fn test_checkpoint_interval_too_large() {
+        let config = DaemonConfig {
+            checkpoint_interval_secs: 7200, // 2 hours
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("checkpoint_interval_secs too large"));
+    }
+
+    #[test]
+    fn test_checkpoint_interval_boundary() {
+        // Test minimum boundary
+        let min_config = DaemonConfig {
+            checkpoint_interval_secs: 1,
+            ..Default::default()
+        };
+        assert!(min_config.validate().is_ok());
+
+        // Test maximum boundary
+        let max_config = DaemonConfig {
+            checkpoint_interval_secs: 3600,
+            ..Default::default()
+        };
+        assert!(max_config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_auto_gc_interval_too_small() {
+        let config = DaemonConfig {
+            auto_gc_interval_secs: 30, // 30 seconds
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("auto_gc_interval_secs too small"));
+    }
+
+    #[test]
+    fn test_auto_gc_interval_too_large() {
+        let config = DaemonConfig {
+            auto_gc_interval_secs: 100_000, // > 24 hours
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("auto_gc_interval_secs too large"));
+    }
+
+    #[test]
+    fn test_auto_gc_interval_boundary() {
+        // Test minimum boundary
+        let min_config = DaemonConfig {
+            auto_gc_interval_secs: 60,
+            ..Default::default()
+        };
+        assert!(min_config.validate().is_ok());
+
+        // Test maximum boundary
+        let max_config = DaemonConfig {
+            auto_gc_interval_secs: 86400,
+            ..Default::default()
+        };
+        assert!(max_config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_auto_gc_threshold_too_small() {
+        let config = DaemonConfig {
+            auto_gc_checkpoint_threshold: 50,
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("auto_gc_checkpoint_threshold too small"));
+    }
+
+    #[test]
+    fn test_auto_gc_threshold_too_large() {
+        let config = DaemonConfig {
+            auto_gc_checkpoint_threshold: 200_000,
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("auto_gc_checkpoint_threshold too large"));
+    }
+
+    #[test]
+    fn test_auto_gc_threshold_boundary() {
+        // Test minimum boundary
+        let min_config = DaemonConfig {
+            auto_gc_checkpoint_threshold: 100,
+            ..Default::default()
+        };
+        assert!(min_config.validate().is_ok());
+
+        // Test maximum boundary
+        let max_config = DaemonConfig {
+            auto_gc_checkpoint_threshold: 100_000,
+            ..Default::default()
+        };
+        assert!(max_config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_retain_count_too_small() {
+        let config = GcConfig {
+            retain_count: 5,
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("retain_count too small"));
+    }
+
+    #[test]
+    fn test_retain_count_too_large() {
+        let config = GcConfig {
+            retain_count: 2_000_000,
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("retain_count too large"));
+    }
+
+    #[test]
+    fn test_retain_count_boundary() {
+        // Test minimum boundary
+        let min_config = GcConfig {
+            retain_count: 10,
+            ..Default::default()
+        };
+        assert!(min_config.validate().is_ok());
+
+        // Test maximum boundary
+        let max_config = GcConfig {
+            retain_count: 1_000_000,
+            ..Default::default()
+        };
+        assert!(max_config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_retain_hours_zero_is_valid() {
+        // 0 is a special case meaning no time-based retention
+        let config = GcConfig {
+            retain_hours: 0,
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_retain_hours_too_large() {
+        let config = GcConfig {
+            retain_hours: 10_000, // > 1 year
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("retain_hours too large"));
+    }
+
+    #[test]
+    fn test_retain_hours_boundary() {
+        // Test maximum boundary
+        let max_config = GcConfig {
+            retain_hours: 8760, // 1 year
+            ..Default::default()
+        };
+        assert!(max_config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_system_config_validation_propagates_errors() {
+        let config = SystemConfig {
+            daemon: DaemonConfig {
+                checkpoint_interval_secs: 0, // Invalid
+                ..Default::default()
+            },
+            gc: GcConfig::default(),
+        };
+
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid daemon configuration"));
     }
 }
