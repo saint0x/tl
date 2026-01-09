@@ -22,6 +22,9 @@ pub enum IpcRequest {
     GetCheckpoint(String),
     /// Flush pending changes and create checkpoint immediately
     FlushCheckpoint,
+    /// Force create a checkpoint even with no pending changes (proactive checkpoint)
+    /// This creates a "snapshot" of the current state that can be restored to later
+    ForceCheckpoint,
     /// Request graceful shutdown
     Shutdown,
     /// Get checkpoints with pagination (for log)
@@ -223,6 +226,20 @@ impl IpcClient {
             IpcResponse::CheckpointFlushed(checkpoint_id) => Ok(checkpoint_id),
             IpcResponse::Error(err) => anyhow::bail!("Daemon error: {}", err),
             _ => anyhow::bail!("Unexpected response to FlushCheckpoint"),
+        }
+    }
+
+    /// Force create a checkpoint even with no pending changes (proactive checkpoint)
+    /// This creates a "snapshot" of the current state that can be restored to later,
+    /// useful for marking a point before making risky changes
+    pub async fn force_checkpoint(&mut self) -> Result<String> {
+        match self.send_request(&IpcRequest::ForceCheckpoint).await? {
+            IpcResponse::CheckpointFlushed(Some(checkpoint_id)) => Ok(checkpoint_id),
+            IpcResponse::CheckpointFlushed(None) => {
+                anyhow::bail!("No checkpoints exist yet - cannot create proactive checkpoint")
+            }
+            IpcResponse::Error(err) => anyhow::bail!("Daemon error: {}", err),
+            _ => anyhow::bail!("Unexpected response to ForceCheckpoint"),
         }
     }
 

@@ -111,6 +111,7 @@ async fn sync_working_directory(
     // Sync each updated branch
     println!("{}", "Syncing working directory...".dimmed());
 
+    let mut any_synced = false;
     for branch in &updated_branches {
         if let Some(remote_commit_id) = &branch.remote_commit_id {
             let short_id = &remote_commit_id[..12.min(remote_commit_id.len())];
@@ -120,9 +121,23 @@ async fn sync_working_directory(
             match jj::git_ops::export_commit_to_dir(workspace, remote_commit_id, repo_root) {
                 Ok(()) => {
                     println!("    {} Files synced", "✓".green());
+                    any_synced = true;
                 }
                 Err(e) => {
                     println!("    {} Failed to sync: {}", "✗".red(), e);
+                }
+            }
+        }
+    }
+
+    // CRITICAL: Invalidate pathmap after modifying working directory
+    // The daemon's in-memory pathmap is now stale and needs to be rebuilt
+    if any_synced {
+        let socket_path = tl_dir.join("state/daemon.sock");
+        if socket_path.exists() {
+            if let Ok(mut client) = crate::ipc::IpcClient::connect(&socket_path).await {
+                if let Err(e) = client.invalidate_pathmap().await {
+                    tracing::warn!("Failed to invalidate pathmap after fetch sync: {}", e);
                 }
             }
         }

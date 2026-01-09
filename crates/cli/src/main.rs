@@ -183,7 +183,12 @@ enum Commands {
     /// Stop the daemon
     Stop,
     /// Force checkpoint creation immediately
-    Flush,
+    Flush {
+        /// Create a restore point even with no pending changes
+        /// Useful for marking a point before making risky changes
+        #[arg(long, short = 'f')]
+        force: bool,
+    },
     /// Manage JJ workspaces with timelapse integration
     #[command(subcommand)]
     Worktree(WorktreeCommands),
@@ -281,7 +286,7 @@ async fn main() -> Result<()> {
         }
         Commands::Start { foreground } => cmd::start::run(foreground).await,
         Commands::Stop => cmd::stop::run().await,
-        Commands::Flush => cmd::flush::execute().await,
+        Commands::Flush { force } => cmd::flush::execute(force).await,
         Commands::Worktree(worktree_cmd) => match worktree_cmd {
             WorktreeCommands::List => cmd::worktree_list::run().await,
             WorktreeCommands::Add { name, path, from, no_checkpoint } => {

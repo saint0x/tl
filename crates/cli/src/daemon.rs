@@ -361,6 +361,49 @@ impl Daemon {
                                         Err(_) => Ok(IpcResponse::Error("Flush request cancelled".to_string())),
                                     }
                                 }
+                                IpcRequest::ForceCheckpoint => {
+                                    // Create a proactive checkpoint even with no pending changes
+                                    // This captures the current HEAD state as a new checkpoint for
+                                    // "restore point" semantics - useful before risky operations
+
+                                    // Get current HEAD checkpoint
+                                    let head = match journal.latest() {
+                                        Ok(Some(cp)) => cp,
+                                        Ok(None) => {
+                                            return Ok(IpcResponse::Error(
+                                                "No checkpoints exist yet. Make a change first to create initial checkpoint.".to_string()
+                                            ));
+                                        }
+                                        Err(e) => return Ok(IpcResponse::Error(e.to_string())),
+                                    };
+
+                                    // Create a new checkpoint with the same tree but new ID and timestamp
+                                    // This is a "proactive" checkpoint - marking a point in time
+                                    let new_checkpoint = journal::Checkpoint::new(
+                                        Some(head.id),
+                                        head.root_tree,
+                                        journal::CheckpointReason::Manual,
+                                        vec![], // No touched paths - this is a snapshot
+                                        journal::CheckpointMeta {
+                                            files_changed: 0,
+                                            bytes_added: 0,
+                                            bytes_removed: 0,
+                                        },
+                                    );
+
+                                    let checkpoint_id = new_checkpoint.id.to_string();
+
+                                    // Append to journal
+                                    if let Err(e) = journal.append(&new_checkpoint) {
+                                        return Ok(IpcResponse::Error(format!("Failed to create checkpoint: {}", e)));
+                                    }
+
+                                    // Update checkpoint count cache
+                                    checkpoint_count_cache.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                                    tracing::info!("Created proactive checkpoint: {}", checkpoint_id);
+                                    Ok(IpcResponse::CheckpointFlushed(Some(checkpoint_id)))
+                                }
                                 IpcRequest::GetCheckpoints { limit, offset } => {
                                     let mut checkpoints = Vec::new();
                                     let limit = limit.unwrap_or(20);
