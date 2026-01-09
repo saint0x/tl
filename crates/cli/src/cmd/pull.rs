@@ -67,16 +67,16 @@ pub async fn run(
     // 6. Get remote branch updates
     let remote_branches = jj::git_ops::get_remote_branch_updates(&workspace)?;
 
-    // Find the primary branch to sync to (prefer tl/main, then tl/HEAD)
+    // Find the primary branch to sync to (prefer main, then master, then first available)
     let sync_branch = remote_branches.iter()
-        .find(|b| b.name == "tl/main")
-        .or_else(|| remote_branches.iter().find(|b| b.name == "tl/HEAD"))
+        .find(|b| b.name == "main")
+        .or_else(|| remote_branches.iter().find(|b| b.name == "master"))
         .or_else(|| remote_branches.first());
 
     let sync_branch = match sync_branch {
         Some(b) => b,
         None => {
-            println!("{}", "No tl/* branches found on remote.".dimmed());
+            println!("{}", "No branches found on remote.".dimmed());
             // Try to re-apply stash even if no remote branches
             if let Some(stash) = stash_entry {
                 reapply_stash(&repo_root, &store, &journal, &stash_manager, stash).await?;

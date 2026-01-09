@@ -199,7 +199,7 @@ pub fn configure_jj_bookmarks(repo_root: &Path) -> Result<()> {
 
     let configs = vec![
         ("revsets.log", "bookmarks() | @"),
-        ("git.push-bookmark-prefix", "tl/"),
+        ("git.push-bookmark-prefix", ""),
         ("ui.default-description", ""),
     ];
 
@@ -238,13 +238,12 @@ pub fn check_jj_binary() -> Result<bool> {
 
 /// Create a JJ bookmark (branch) using native jj-lib APIs
 ///
-/// Creates a bookmark pointing to the specified commit. The bookmark name
-/// is automatically prefixed with "tl/" if not already prefixed.
+/// Creates a bookmark pointing to the specified commit using standard Git branch naming.
 ///
 /// # Arguments
 ///
 /// * `workspace` - JJ workspace (must be loaded)
-/// * `bookmark_name` - Name of the bookmark to create (e.g., "feature" or "tl/feature")
+/// * `bookmark_name` - Name of the bookmark to create (e.g., "main", "feature", "fix/bug-123")
 /// * `commit_id` - Hex string of the commit ID to point the bookmark at
 ///
 /// # Errors
@@ -267,12 +266,8 @@ pub fn create_bookmark_native(
         .context("Invalid commit ID hex string")?;
     let commit_id = CommitId::from_bytes(&commit_id_bytes);
 
-    // Ensure tl/ prefix
-    let full_name = if bookmark_name.starts_with("tl/") {
-        bookmark_name.to_string()
-    } else {
-        format!("tl/{}", bookmark_name)
-    };
+    // Use bookmark name directly (standard Git naming)
+    let full_name = bookmark_name.to_string();
 
     // Start transaction
     let mut tx = repo.start_transaction();
@@ -362,7 +357,7 @@ email = "{}"
 log = "bookmarks() | @"
 
 [git]
-push-bookmark-prefix = "tl/"
+push-bookmark-prefix = ""
 
 [ui]
 default-description = ""

@@ -136,8 +136,8 @@ pub async fn run(
     mapping.flush()
         .context("Failed to flush checkpoint mapping to disk")?;
 
-    // 8. Create bookmark (auto-create tl/HEAD if not specified)
-    let bookmark_name = bookmark.unwrap_or_else(|| "HEAD".to_string());
+    // 8. Create bookmark (auto-create main if not specified)
+    let bookmark_name = bookmark.unwrap_or_else(|| "main".to_string());
     let last_commit_id = commit_ids.last().unwrap();
 
     // Load workspace and create bookmark natively
@@ -145,13 +145,7 @@ pub async fn run(
     jj::create_bookmark_native(&mut workspace, &bookmark_name, last_commit_id)
         .context("Failed to create JJ bookmark")?;
 
-    let bookmark_display = if bookmark_name.starts_with("tl/") {
-        bookmark_name.clone()
-    } else {
-        format!("tl/{}", bookmark_name)
-    };
-
-    println!("{} Updated bookmark: {}", "✓".green(), bookmark_display.yellow());
+    println!("{} Updated bookmark: {}", "✓".green(), bookmark_name.yellow());
 
     // 9. Auto-pin if configured
     if !no_pin {

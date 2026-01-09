@@ -60,8 +60,8 @@ pub enum BranchPushStatus {
 ///
 /// # Arguments
 /// * `workspace` - JJ workspace (must be git-backed)
-/// * `bookmark` - Optional bookmark name (will push tl/<bookmark>)
-/// * `all` - Push all tl/* bookmarks
+/// * `bookmark` - Optional bookmark name (standard Git branch name)
+/// * `all` - Push all bookmarks
 /// * `force` - Force push (non-fast-forward)
 pub fn native_git_push(
     workspace: &mut Workspace,
@@ -91,30 +91,23 @@ pub fn native_git_push(
     let origin_remote: &RemoteName = "origin".as_ref();
 
     if all {
-        // Collect all tl/* bookmarks
+        // Collect all bookmarks
         for (bookmark_name, target) in view.local_bookmarks() {
-            // Use as_str() to check string properties
-            if bookmark_name.as_str().starts_with("tl/") {
-                if let Some(local_commit_id) = target.as_normal() {
-                    // Create remote symbol for lookup
-                    let remote_symbol = bookmark_name.to_remote_symbol(origin_remote);
-                    let remote_ref = view.get_remote_bookmark(remote_symbol);
-                    let remote_commit_id = remote_ref.target.as_normal().map(|id| id.hex());
-                    branches_to_push.push((
-                        bookmark_name.as_str().to_string(),
-                        Some(local_commit_id.hex()),
-                        remote_commit_id,
-                    ));
-                }
+            if let Some(local_commit_id) = target.as_normal() {
+                // Create remote symbol for lookup
+                let remote_symbol = bookmark_name.to_remote_symbol(origin_remote);
+                let remote_ref = view.get_remote_bookmark(remote_symbol);
+                let remote_commit_id = remote_ref.target.as_normal().map(|id| id.hex());
+                branches_to_push.push((
+                    bookmark_name.as_str().to_string(),
+                    Some(local_commit_id.hex()),
+                    remote_commit_id,
+                ));
             }
         }
     } else if let Some(bookmark_name) = bookmark {
-        // Single bookmark
-        let full_name = if bookmark_name.starts_with("tl/") {
-            bookmark_name.to_string()
-        } else {
-            format!("tl/{}", bookmark_name)
-        };
+        // Single bookmark (use name as-is, standard Git naming)
+        let full_name = bookmark_name.to_string();
 
         // Convert to RefName for lookup
         let ref_name: &RefName = full_name.as_ref();
@@ -132,19 +125,25 @@ pub fn native_git_push(
             anyhow::bail!("Branch {} not found or not at a single commit", full_name);
         }
     } else {
-        // Auto-detect: find tl/HEAD or first tl/* bookmark (like `git push` auto-detects current branch)
+        // Auto-detect: find main or first available bookmark (like `git push` auto-detects current branch)
         let mut auto_bookmark: Option<String> = None;
 
-        // Priority 1: tl/HEAD (default publish target)
-        let head_ref: &RefName = "tl/HEAD".as_ref();
-        if view.get_local_bookmark(head_ref).is_present() {
-            auto_bookmark = Some("tl/HEAD".to_string());
+        // Priority 1: main (default branch)
+        let main_ref: &RefName = "main".as_ref();
+        if view.get_local_bookmark(main_ref).is_present() {
+            auto_bookmark = Some("main".to_string());
         } else {
-            // Priority 2: First available tl/* bookmark
-            for (bookmark_name, target) in view.local_bookmarks() {
-                if bookmark_name.as_str().starts_with("tl/") && target.as_normal().is_some() {
-                    auto_bookmark = Some(bookmark_name.as_str().to_string());
-                    break;
+            // Priority 2: master (alternative default)
+            let master_ref: &RefName = "master".as_ref();
+            if view.get_local_bookmark(master_ref).is_present() {
+                auto_bookmark = Some("master".to_string());
+            } else {
+                // Priority 3: First available bookmark
+                for (bookmark_name, target) in view.local_bookmarks() {
+                    if target.as_normal().is_some() {
+                        auto_bookmark = Some(bookmark_name.as_str().to_string());
+                        break;
+                    }
                 }
             }
         }
@@ -433,11 +432,6 @@ pub fn get_remote_branch_updates(workspace: &jj_lib::workspace::Workspace) -> Re
 
     // Iterate through all remote bookmarks for "origin"
     for (bookmark_name, remote_ref) in view.remote_bookmarks(&origin_remote) {
-        // Only look at tl/* branches - use as_str() for string operations
-        if !bookmark_name.as_str().starts_with("tl/") {
-            continue;
-        }
-
         let remote_commit_id = remote_ref.target.as_normal().map(|id| id.hex());
 
         // Get local bookmark if exists
@@ -496,11 +490,6 @@ pub fn get_local_branches(workspace: &jj_lib::workspace::Workspace) -> Result<Ve
 
     // Iterate through all local bookmarks
     for (bookmark_name, local_ref) in view.local_bookmarks() {
-        // Only show tl/* branches - use as_str() for string operations
-        if !bookmark_name.as_str().starts_with("tl/") {
-            continue;
-        }
-
         let commit_id = match local_ref.as_normal() {
             Some(id) => id.hex(),
             None => continue, // Skip conflicted refs
@@ -545,11 +534,6 @@ pub fn get_remote_only_branches(workspace: &jj_lib::workspace::Workspace) -> Res
 
     // Iterate through all remote bookmarks for "origin"
     for (bookmark_name, remote_ref) in view.remote_bookmarks(&origin_remote) {
-        // Only look at tl/* branches - use as_str() for string operations
-        if !bookmark_name.as_str().starts_with("tl/") {
-            continue;
-        }
-
         // Skip if there's a local bookmark
         let local_target = view.get_local_bookmark(bookmark_name);
         if local_target.is_present() {
@@ -581,12 +565,8 @@ pub fn delete_local_branch(workspace: &mut jj_lib::workspace::Workspace, branch_
     let repo = workspace.repo_loader().load_at_head()
         .context("Failed to load repository")?;
 
-    // Ensure tl/ prefix
-    let full_name = if branch_name.starts_with("tl/") {
-        branch_name.to_string()
-    } else {
-        format!("tl/{}", branch_name)
-    };
+    // Use branch name as-is (standard Git naming)
+    let full_name = branch_name.to_string();
 
     // Convert to RefName for API calls
     let ref_name: &RefName = full_name.as_ref();

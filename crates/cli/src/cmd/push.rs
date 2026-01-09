@@ -31,10 +31,8 @@ pub async fn run(
     let mut workspace = jj::load_workspace(&repo_root)
         .context("Failed to load JJ workspace")?;
 
-    // Extract bookmark name (remove tl/ prefix if user included it)
-    let bookmark_ref = bookmark.as_ref().map(|b| {
-        b.strip_prefix("tl/").unwrap_or(b)
-    });
+    // Use bookmark name as-is (standard Git naming)
+    let bookmark_ref = bookmark.as_deref();
 
     // Execute native git push (now returns detailed results)
     let results = jj::git_ops::native_git_push(&mut workspace, bookmark_ref, all, force)?;

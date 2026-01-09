@@ -1,6 +1,6 @@
 //! Branch management command
 //!
-//! List, create, and delete branches (JJ bookmarks with tl/ prefix).
+//! List, create, and delete branches (JJ bookmarks with standard Git naming).
 
 use anyhow::{Context, Result};
 use crate::util;
