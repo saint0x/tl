@@ -216,6 +216,139 @@ enum Commands {
         #[arg(short, long)]
         example: bool,
     },
+    /// Manage Git tags
+    #[command(subcommand)]
+    Tag(TagCommands),
+    /// Manage stashes (save and restore work-in-progress)
+    #[command(subcommand)]
+    Stash(StashCommands),
+    /// Manage Git remotes
+    #[command(subcommand)]
+    Remote(RemoteCommands),
+}
+
+#[derive(Subcommand)]
+enum TagCommands {
+    /// List all tags
+    List,
+    /// Create a new tag
+    Create {
+        /// Tag name
+        name: String,
+        /// Checkpoint to tag (default: HEAD)
+        #[arg(long)]
+        checkpoint: Option<String>,
+        /// Annotated tag message
+        #[arg(short, long)]
+        message: Option<String>,
+        /// Force overwrite existing tag
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// Delete a tag
+    Delete {
+        /// Tag name
+        name: String,
+    },
+    /// Show tag details
+    Show {
+        /// Tag name
+        name: String,
+    },
+    /// Push tags to remote
+    Push {
+        /// Tag name (optional)
+        name: Option<String>,
+        /// Push all tags
+        #[arg(long)]
+        all: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum StashCommands {
+    /// List all stashes
+    List,
+    /// Save working changes to stash
+    Push {
+        /// Stash message
+        #[arg(short, long)]
+        message: Option<String>,
+        /// Include untracked files
+        #[arg(short = 'u', long)]
+        include_untracked: bool,
+    },
+    /// Apply a stash to working directory
+    Apply {
+        /// Stash reference (e.g., stash@{0} or stash/name)
+        stash: Option<String>,
+    },
+    /// Apply and remove a stash
+    Pop {
+        /// Stash reference (e.g., stash@{0} or stash/name)
+        stash: Option<String>,
+    },
+    /// Delete a stash
+    Drop {
+        /// Stash reference (e.g., stash@{0} or stash/name)
+        stash: Option<String>,
+    },
+    /// Delete all stashes
+    Clear {
+        /// Skip confirmation prompt
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum RemoteCommands {
+    /// List all remotes
+    List {
+        /// Show URLs
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    /// Add a new remote
+    Add {
+        /// Remote name
+        name: String,
+        /// Remote URL
+        url: String,
+        /// Fetch immediately after adding
+        #[arg(short, long)]
+        fetch: bool,
+    },
+    /// Remove a remote
+    Remove {
+        /// Remote name
+        name: String,
+    },
+    /// Change remote URL
+    SetUrl {
+        /// Remote name
+        name: String,
+        /// New URL
+        url: String,
+        /// Set push URL (instead of fetch URL)
+        #[arg(long)]
+        push: bool,
+    },
+    /// Rename a remote
+    Rename {
+        /// Old remote name
+        old_name: String,
+        /// New remote name
+        new_name: String,
+    },
+    /// Get remote URL
+    GetUrl {
+        /// Remote name
+        name: String,
+        /// Get push URL (instead of fetch URL)
+        #[arg(long)]
+        push: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -344,6 +477,41 @@ async fn main() -> Result<()> {
             } else {
                 // Default to list
                 cmd::config::run_list().await
+            }
+        },
+        Commands::Tag(tag_cmd) => match tag_cmd {
+            TagCommands::List => cmd::tag::run_list().await,
+            TagCommands::Create { name, checkpoint, message, force } => {
+                cmd::tag::run_create(&name, checkpoint, message, force).await
+            }
+            TagCommands::Delete { name } => cmd::tag::run_delete(&name).await,
+            TagCommands::Show { name } => cmd::tag::run_show(&name).await,
+            TagCommands::Push { name, all } => cmd::tag::run_push(name, all).await,
+        },
+        Commands::Stash(stash_cmd) => match stash_cmd {
+            StashCommands::List => cmd::stash::run_list().await,
+            StashCommands::Push { message, include_untracked } => {
+                cmd::stash::run_push(message, include_untracked).await
+            }
+            StashCommands::Apply { stash } => cmd::stash::run_apply(stash, false).await,
+            StashCommands::Pop { stash } => cmd::stash::run_apply(stash, true).await,
+            StashCommands::Drop { stash } => cmd::stash::run_drop(stash).await,
+            StashCommands::Clear { yes } => cmd::stash::run_clear(yes).await,
+        },
+        Commands::Remote(remote_cmd) => match remote_cmd {
+            RemoteCommands::List { verbose } => cmd::remote::run_list(verbose).await,
+            RemoteCommands::Add { name, url, fetch } => {
+                cmd::remote::run_add(&name, &url, fetch).await
+            }
+            RemoteCommands::Remove { name } => cmd::remote::run_remove(&name).await,
+            RemoteCommands::SetUrl { name, url, push } => {
+                cmd::remote::run_set_url(&name, &url, push).await
+            }
+            RemoteCommands::Rename { old_name, new_name } => {
+                cmd::remote::run_rename(&old_name, &new_name).await
+            }
+            RemoteCommands::GetUrl { name, push } => {
+                cmd::remote::run_get_url(&name, push).await
             }
         },
     }
