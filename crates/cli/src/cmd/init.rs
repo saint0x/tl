@@ -131,7 +131,9 @@ pub async fn run(skip_git: bool, skip_jj: bool) -> Result<()> {
     }
 
     // Phase 5: Configuration Synchronization
-    sync_configurations(&current_dir, git_initialized || git_exists)?;
+    // Check if JJ exists (either was just initialized or existed before)
+    let jj_exists_now = jj_initialized || jj::detect_jj_workspace(&current_dir)?.is_some();
+    sync_configurations(&current_dir, git_initialized || git_exists, jj_exists_now)?;
 
     // Phase 6: Success Summary
     print_success_summary(&current_dir, git_initialized, jj_initialized);
@@ -235,7 +237,7 @@ fn initialize_jj_if_needed(
     Ok(true) // We initialized it
 }
 
-fn sync_configurations(repo_root: &Path, git_exists: bool) -> Result<()> {
+fn sync_configurations(repo_root: &Path, git_exists: bool, jj_exists: bool) -> Result<()> {
     if !git_exists {
         return Ok(()); // Nothing to sync
     }
@@ -245,8 +247,12 @@ fn sync_configurations(repo_root: &Path, git_exists: bool) -> Result<()> {
 
     let tl_dir = repo_root.join(".tl");
 
-    // 1. Update .gitignore
-    crate::util::ensure_gitignore_patterns(repo_root, &[".tl/"])
+    // 1. Update .gitignore with .tl/ and .jj/ (if JJ exists)
+    let mut patterns = vec![".tl/"];
+    if jj_exists {
+        patterns.push(".jj/");
+    }
+    crate::util::ensure_gitignore_patterns(repo_root, &patterns)
         .context("Failed to update .gitignore")?;
     println!("  {} Updated .gitignore", "✓".green());
 
