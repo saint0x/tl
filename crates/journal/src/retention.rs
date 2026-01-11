@@ -193,20 +193,30 @@ impl PinManager {
     }
 
     /// Pin a checkpoint with a name
+    ///
+    /// Pin names can be hierarchical using "/" as separator (e.g., "stash/my-wip").
+    /// Each component must be alphanumeric with hyphens/underscores.
     pub fn pin(&self, name: &str, checkpoint_id: Ulid) -> Result<()> {
-        // Validate pin name (alphanumeric + hyphens/underscores only)
+        // Validate pin name (alphanumeric + hyphens/underscores/slashes)
+        // Slashes are allowed for hierarchical names like "stash/wip-20240101"
         if !name
             .chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '/')
         {
-            anyhow::bail!("Invalid pin name: must be alphanumeric with hyphens/underscores");
+            anyhow::bail!("Invalid pin name: must be alphanumeric with hyphens/underscores/slashes");
         }
-
-        // Ensure pins directory exists
-        fs::create_dir_all(&self.pins_dir)?;
+        // Don't allow leading/trailing slashes or double slashes
+        if name.starts_with('/') || name.ends_with('/') || name.contains("//") {
+            anyhow::bail!("Invalid pin name: cannot start/end with slash or contain double slashes");
+        }
 
         // Write ULID to pin file
         let pin_path = self.pins_dir.join(name);
+
+        // Ensure parent directory exists (for hierarchical names like "stash/wip")
+        if let Some(parent) = pin_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         let ulid_str = checkpoint_id.to_string();
 
         // Atomic write (not critical for pins, but good practice)
@@ -229,27 +239,49 @@ impl PinManager {
         Ok(())
     }
 
-    /// List all pins
+    /// List all pins (including hierarchical pins in subdirectories)
     pub fn list_pins(&self) -> Result<Vec<(String, Ulid)>> {
         if !self.pins_dir.exists() {
             return Ok(Vec::new());
         }
 
         let mut pins = Vec::new();
+        self.list_pins_recursive(&self.pins_dir, "", &mut pins)?;
+        Ok(pins)
+    }
 
-        for entry in fs::read_dir(&self.pins_dir)? {
+    /// Recursively list pins in a directory
+    fn list_pins_recursive(
+        &self,
+        dir: &Path,
+        prefix: &str,
+        pins: &mut Vec<(String, Ulid)>,
+    ) -> Result<()> {
+        for entry in fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
+            let file_name = entry.file_name().to_string_lossy().to_string();
 
             if path.is_file() {
-                let name = entry.file_name().to_string_lossy().to_string();
+                let name = if prefix.is_empty() {
+                    file_name
+                } else {
+                    format!("{}/{}", prefix, file_name)
+                };
                 let contents = fs::read_to_string(&path)?;
-                let ulid = Ulid::from_string(contents.trim())?;
-                pins.push((name, ulid));
+                if let Ok(ulid) = Ulid::from_string(contents.trim()) {
+                    pins.push((name, ulid));
+                }
+            } else if path.is_dir() {
+                let new_prefix = if prefix.is_empty() {
+                    file_name
+                } else {
+                    format!("{}/{}", prefix, file_name)
+                };
+                self.list_pins_recursive(&path, &new_prefix, pins)?;
             }
         }
-
-        Ok(pins)
+        Ok(())
     }
 
     /// Get all pinned checkpoint IDs (for GC mark phase)

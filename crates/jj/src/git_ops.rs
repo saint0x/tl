@@ -409,25 +409,76 @@ pub fn native_git_fetch(workspace: &mut Workspace) -> Result<()> {
 /// - commits_ahead: number of commits in local_id not reachable from remote_id
 /// - commits_behind: number of commits in remote_id not reachable from local_id
 ///
-/// Note: This is a simplified implementation that uses commit ancestry.
-/// For JJ 0.36, we use a basic traversal approach.
+/// Uses commit graph traversal to count the exact number of commits.
 fn calculate_ahead_behind(
     repo: &Arc<ReadonlyRepo>,
     local_id: &CommitId,
     remote_id: &CommitId,
 ) -> Result<(usize, usize)> {
-    // For now, use a simplified heuristic:
-    // If the commits are different, we don't have an efficient way to count
-    // the exact ahead/behind without more complex graph traversal.
-    //
-    // Future improvement: implement proper commit graph traversal
-    // using repo.index() or revset evaluation.
+    use std::collections::HashSet;
 
-    // As a placeholder, return (1, 0) or (0, 1) based on basic ancestry check
-    // This at least indicates there is a difference
+    // If commits are the same, no difference
+    if local_id == remote_id {
+        return Ok((0, 0));
+    }
 
-    // For now, just indicate that they differ without precise counting
-    Ok((1, 0))  // Simplified: assume local is ahead
+    // Find common ancestor by walking both histories
+    // We use BFS from both commits and find the intersection
+    let mut local_ancestors: HashSet<CommitId> = HashSet::new();
+    let mut remote_ancestors: HashSet<CommitId> = HashSet::new();
+
+    // Walk local history
+    let mut local_queue = vec![local_id.clone()];
+    while let Some(commit_id) = local_queue.pop() {
+        if local_ancestors.contains(&commit_id) {
+            continue;
+        }
+        local_ancestors.insert(commit_id.clone());
+
+        // Get parent commits
+        if let Ok(commit) = repo.store().get_commit(&commit_id) {
+            for parent_id in commit.parent_ids() {
+                if !local_ancestors.contains(parent_id) {
+                    local_queue.push(parent_id.clone());
+                }
+            }
+        }
+    }
+
+    // Walk remote history
+    let mut remote_queue = vec![remote_id.clone()];
+    while let Some(commit_id) = remote_queue.pop() {
+        if remote_ancestors.contains(&commit_id) {
+            continue;
+        }
+        remote_ancestors.insert(commit_id.clone());
+
+        // Get parent commits
+        if let Ok(commit) = repo.store().get_commit(&commit_id) {
+            for parent_id in commit.parent_ids() {
+                if !remote_ancestors.contains(parent_id) {
+                    remote_queue.push(parent_id.clone());
+                }
+            }
+        }
+    }
+
+    // Find common ancestors (intersection)
+    let common: HashSet<_> = local_ancestors.intersection(&remote_ancestors).cloned().collect();
+
+    // Count commits ahead: local commits not in remote ancestors (excluding common)
+    let commits_ahead = local_ancestors
+        .iter()
+        .filter(|id| !remote_ancestors.contains(*id))
+        .count();
+
+    // Count commits behind: remote commits not in local ancestors (excluding common)
+    let commits_behind = remote_ancestors
+        .iter()
+        .filter(|id| !local_ancestors.contains(*id))
+        .count();
+
+    Ok((commits_ahead, commits_behind))
 }
 
 /// Information about a remote branch

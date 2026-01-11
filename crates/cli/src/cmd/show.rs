@@ -6,25 +6,27 @@ use anyhow::{Context, Result};
 use owo_colors::OwoColorize;
 use std::path::Path;
 use tl_core::store::Store;
-use journal::{Journal, PinManager};
 
 /// Show detailed information about a checkpoint
 pub async fn run(checkpoint_ref: &str, show_diff: bool) -> Result<()> {
     let repo_root = util::find_repo_root()?;
+    let tl_dir = repo_root.join(".tl");
 
-    // Open store and journal
+    // Ensure daemon is running (auto-start if needed)
+    crate::daemon::ensure_daemon_running().await?;
+
+    // Open store for tree operations
     let store = Store::open(&repo_root)
         .context("Failed to open store")?;
-    let journal = Journal::open(store.tl_dir())
-        .context("Failed to open journal")?;
 
-    // Resolve checkpoint reference
-    let resolved = data_access::resolve_checkpoint_refs(&[checkpoint_ref.to_string()], store.tl_dir()).await?;
+    // Resolve checkpoint reference via data_access layer
+    let resolved = data_access::resolve_checkpoint_refs(&[checkpoint_ref.to_string()], &tl_dir).await?;
     let checkpoint_id = resolved[0]
         .ok_or_else(|| anyhow::anyhow!("Checkpoint not found: {}", checkpoint_ref))?;
 
-    // Get checkpoint
-    let checkpoint = journal.get(&checkpoint_id)?
+    // Get checkpoint data via data_access layer
+    let checkpoints = data_access::get_checkpoints(&[checkpoint_id], &tl_dir).await?;
+    let checkpoint = checkpoints[0].clone()
         .ok_or_else(|| anyhow::anyhow!("Checkpoint not found: {}", checkpoint_id))?;
 
     // Print checkpoint details
@@ -70,9 +72,9 @@ pub async fn run(checkpoint_ref: &str, show_diff: bool) -> Result<()> {
         println!("\n{}", "Diff:".bold());
 
         if let Some(parent_id) = checkpoint.parent {
-            // Load parent tree
-            let parent_checkpoint = journal.get(&parent_id)?;
-            if let Some(parent_cp) = parent_checkpoint {
+            // Get parent checkpoint via data_access layer
+            let parent_checkpoints = data_access::get_checkpoints(&[parent_id], &tl_dir).await?;
+            if let Some(parent_cp) = parent_checkpoints[0].clone() {
                 let parent_tree = store.read_tree(parent_cp.root_tree)?;
                 let current_tree = store.read_tree(checkpoint.root_tree)?;
 
@@ -91,33 +93,19 @@ pub async fn run(checkpoint_ref: &str, show_diff: bool) -> Result<()> {
 
 /// Format timestamp in absolute format (YYYY-MM-DD HH:MM:SS)
 fn format_absolute_timestamp(ts_ms: u64) -> String {
-    use std::time::{Duration, UNIX_EPOCH};
+    use chrono::{DateTime, Local, TimeZone, Utc};
 
-    let duration = Duration::from_millis(ts_ms);
-    let datetime = UNIX_EPOCH + duration;
+    // Convert milliseconds to seconds and nanoseconds
+    let secs = (ts_ms / 1000) as i64;
+    let nsecs = ((ts_ms % 1000) * 1_000_000) as u32;
 
-    // Convert to local time string
-    // Using chrono would be better, but we'll use a simple format for now
-    match datetime.duration_since(UNIX_EPOCH) {
-        Ok(d) => {
-            let secs = d.as_secs();
-            let days = secs / 86400;
-            let hours = (secs % 86400) / 3600;
-            let minutes = (secs % 3600) / 60;
-            let seconds = secs % 60;
-
-            // Simple date calculation (not accurate for all cases, but good enough)
-            let epoch_year = 1970;
-            let years = days / 365;
-            let year = epoch_year + years;
-            let remaining_days = days % 365;
-            let month = (remaining_days / 30) + 1;
-            let day = (remaining_days % 30) + 1;
-
-            format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-                year, month, day, hours, minutes, seconds)
+    // Create UTC datetime and convert to local time
+    match Utc.timestamp_opt(secs, nsecs) {
+        chrono::LocalResult::Single(utc_dt) => {
+            let local_dt: DateTime<Local> = utc_dt.with_timezone(&Local);
+            local_dt.format("%Y-%m-%d %H:%M:%S").to_string()
         }
-        Err(_) => "Unknown time".to_string(),
+        _ => "Unknown time".to_string(),
     }
 }
 

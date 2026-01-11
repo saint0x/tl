@@ -274,7 +274,7 @@ enum StashCommands {
         /// Stash message
         #[arg(short, long)]
         message: Option<String>,
-        /// Include untracked files
+        /// Include untracked files (no-op: timelapse tracks all files)
         #[arg(short = 'u', long)]
         include_untracked: bool,
     },
