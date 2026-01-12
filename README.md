@@ -42,7 +42,10 @@ tl init
 |---------|-------------|
 | `tl log` | Show checkpoint history (default: 20) |
 | `tl log --limit 50` | Show more checkpoints |
+| `tl show <id>` | Show detailed checkpoint information |
+| `tl show <id> -p` | Show checkpoint with diff |
 | `tl flush` | Force immediate checkpoint |
+| `tl flush --force` | Create checkpoint even with no changes |
 | `tl restore <id>` | Restore to checkpoint (interactive) |
 | `tl restore <id> -y` | Restore without confirmation |
 | `tl diff <a> <b>` | File-level diff between checkpoints |
@@ -71,6 +74,9 @@ tl init
 | `tl pull` | Pull from Git remote |
 | `tl pull --fetch-only` | Fetch without merging |
 | `tl pull --no-pin` | Don't pin pulled commits |
+| `tl fetch` | Fetch from Git remote |
+| `tl fetch --no-sync` | Fetch without syncing working directory |
+| `tl fetch --prune` | Remove deleted remote branches |
 
 ### Workspaces
 
@@ -83,6 +89,77 @@ tl init
 | `tl worktree switch <name>` | Switch to workspace |
 | `tl worktree remove <name>` | Remove workspace |
 | `tl worktree remove <name> --delete-files` | Remove with files |
+
+### Branches
+
+| Command | Description |
+|---------|-------------|
+| `tl branch` | List local branches |
+| `tl branch -r` | List remote branches |
+| `tl branch -a` | List all branches |
+| `tl branch --create <name>` | Create new branch |
+| `tl branch --create <name> --at <id>` | Create branch at checkpoint |
+| `tl branch --delete <name>` | Delete a branch |
+| `tl merge <branch>` | Merge changes from branch |
+| `tl merge --abort` | Abort in-progress merge |
+| `tl merge --continue` | Continue after resolving conflicts |
+| `tl resolve` | Check conflict resolution status |
+| `tl resolve -l` | List files with conflict status |
+| `tl resolve --continue` | Continue merge after resolving |
+| `tl resolve --abort` | Abort merge |
+
+### Tags
+
+| Command | Description |
+|---------|-------------|
+| `tl tag list` | List all tags |
+| `tl tag create <name>` | Create tag at HEAD |
+| `tl tag create <name> --checkpoint <id>` | Create tag at checkpoint |
+| `tl tag create <name> -m "message"` | Create annotated tag |
+| `tl tag create <name> --force` | Overwrite existing tag |
+| `tl tag delete <name>` | Delete a tag |
+| `tl tag show <name>` | Show tag details |
+| `tl tag push <name>` | Push tag to remote |
+| `tl tag push --all` | Push all tags to remote |
+
+### Stash
+
+| Command | Description |
+|---------|-------------|
+| `tl stash list` | List all stashes |
+| `tl stash push` | Save working changes to stash |
+| `tl stash push -m "message"` | Stash with message |
+| `tl stash apply` | Apply most recent stash |
+| `tl stash apply stash@{1}` | Apply specific stash |
+| `tl stash pop` | Apply and remove stash |
+| `tl stash drop` | Delete most recent stash |
+| `tl stash clear` | Delete all stashes |
+| `tl stash clear -y` | Delete all stashes without confirmation |
+
+### Remotes
+
+| Command | Description |
+|---------|-------------|
+| `tl remote list` | List all remotes |
+| `tl remote list -v` | List remotes with URLs |
+| `tl remote add <name> <url>` | Add a new remote |
+| `tl remote add <name> <url> --fetch` | Add and fetch immediately |
+| `tl remote remove <name>` | Remove a remote |
+| `tl remote rename <old> <new>` | Rename a remote |
+| `tl remote set-url <name> <url>` | Change remote URL |
+| `tl remote set-url <name> <url> --push` | Set push URL |
+| `tl remote get-url <name>` | Get remote URL |
+
+### Configuration
+
+| Command | Description |
+|---------|-------------|
+| `tl config` | List all configuration values |
+| `tl config --get <key>` | Get a config value |
+| `tl config --set <key>=<value>` | Set a config value |
+| `tl config --path` | Show config file path |
+| `tl config --path --create` | Create config file if missing |
+| `tl config --example` | Show example configuration |
 
 ### Maintenance
 
