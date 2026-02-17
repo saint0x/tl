@@ -5,6 +5,7 @@ use journal::{Checkpoint, Journal, PinManager};
 use owo_colors::OwoColorize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use ulid::Ulid;
 
 /// Find repository root by walking up from cwd to find .tl/
@@ -23,6 +24,34 @@ pub fn find_repo_root() -> Result<PathBuf> {
             None => anyhow::bail!("Not a Timelapse repository (no .tl directory found)"),
         }
     }
+}
+
+/// Strict Git-parity fetch of `origin`.
+///
+/// Intended for latency-sensitive operations that must not pay JJ/daemon overhead.
+pub fn git_fetch_origin(repo_root: &Path, prune: bool) -> Result<()> {
+    // Keep output quiet to avoid skewing latency metrics and to match common CLI expectations.
+    let mut args = vec!["fetch", "--quiet"];
+    if prune {
+        args.push("--prune");
+    }
+    args.push("origin");
+
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(repo_root)
+        .output()
+        .context("Failed to run git fetch")?;
+
+    if out.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if stderr.trim().is_empty() {
+        anyhow::bail!("git fetch failed with status {}", out.status);
+    }
+    anyhow::bail!("git fetch failed: {}", stderr.trim());
 }
 
 /// Resolve checkpoint reference to ULID

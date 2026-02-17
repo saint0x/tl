@@ -25,28 +25,30 @@ pub async fn run(
     let repo_root = util::find_repo_root()?;
     let tl_dir = repo_root.join(".tl");
 
-    // 2. Verify JJ workspace exists
+    // Fetch-only mode should be strict Git parity:
+    // - do not start the daemon
+    // - do not invoke jj (avoid import/transaction overhead)
+    if fetch_only {
+        println!("{}", "Fetching from Git remote...".dimmed());
+        util::git_fetch_origin(&repo_root, false)?;
+        println!("{} Fetched from remote", "✓".green());
+        println!();
+        println!("{}", "Fetch complete. Use 'tl pull' (without --fetch-only) to sync working directory.".dimmed());
+        return Ok(());
+    }
+
+    // 2. Verify JJ workspace exists (required for the full pull workflow)
     if jj::detect_jj_workspace(&repo_root)?.is_none() {
         anyhow::bail!("No JJ workspace found. Run 'jj git init' first.");
     }
 
     // 3. Fetch from remote using latency-optimized refspec selection
-    //
-    // Fetch-only mode should not require the daemon at all; it should be as close
-    // to `jj git fetch`/`git fetch` as possible.
     println!("{}", "Fetching from Git remote...".dimmed());
     let mut workspace = jj::load_workspace(&repo_root)
         .context("Failed to load JJ workspace")?;
 
     jj::git_ops::native_git_fetch_for_pull(&mut workspace)?;
     println!("{} Fetched from remote", "✓".green());
-
-    // If fetch-only mode, stop here
-    if fetch_only {
-        println!();
-        println!("{}", "Fetch complete. Use 'tl pull' (without --fetch-only) to sync working directory.".dimmed());
-        return Ok(());
-    }
 
     // From here on we need the daemon (checkpoint import, flush-based auto-stash, etc.).
     crate::daemon::ensure_daemon_running().await?;

@@ -16,23 +16,28 @@ pub async fn run(no_sync: bool, prune: bool) -> Result<()> {
     let repo_root = util::find_repo_root()?;
     let tl_dir = repo_root.join(".tl");
 
-    // 2. Verify JJ workspace exists
+    // `tl fetch --no-sync` should be strict Git parity (fetch only).
+    if no_sync {
+        println!("{}", "Fetching from remote...".dimmed());
+        util::git_fetch_origin(&repo_root, prune)?;
+        println!("{} Fetch complete", "✓".green());
+        return Ok(());
+    }
+
+    // 2. Verify JJ workspace exists (required for sync / branch display)
     if jj::detect_jj_workspace(&repo_root)?.is_none() {
         anyhow::bail!("No JJ workspace found. Run 'tl init' first.");
     }
 
-    // Only require the daemon if we're going to touch the working directory
-    // (auto-stash, sync, pathmap invalidation).
-    if !no_sync {
-        crate::daemon::ensure_daemon_running().await?;
-    }
+    // We will touch the working directory (auto-stash, sync, pathmap invalidation).
+    crate::daemon::ensure_daemon_running().await?;
 
     // 3. Load workspace
     println!("{}", "Fetching from remote...".dimmed());
     let mut workspace = jj::load_workspace(&repo_root)
         .context("Failed to load JJ workspace")?;
 
-    // 4. Perform native git fetch
+    // 4. Perform native git fetch via JJ (imports refs, updates view)
     jj::git_ops::native_git_fetch(&mut workspace)?;
     println!("{} Fetch complete", "✓".green());
 
