@@ -300,7 +300,7 @@ impl WorkspaceManager {
             if entry.file_type().is_symlink() {
                 let target = fs::read_link(path)?;
                 let target_bytes = target.to_string_lossy();
-                let blob_hash = tl_core::hash::hash_bytes(target_bytes.as_bytes());
+                let blob_hash = tl_core::hash::git::hash_blob(target_bytes.as_bytes());
 
                 if !store.blob_store().has_blob(blob_hash) {
                     store.blob_store().write_blob(blob_hash, target_bytes.as_bytes())?;

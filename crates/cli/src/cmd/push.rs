@@ -31,8 +31,16 @@ pub async fn run(
     let mut workspace = jj::load_workspace(&repo_root)
         .context("Failed to load JJ workspace")?;
 
-    // Use bookmark name as-is (standard Git naming)
-    let bookmark_ref = bookmark.as_deref();
+    // Timelapse pushes only `tl/*` bookmarks. Normalize user input so `-b main`
+    // means `tl/main`.
+    let bookmark_full = bookmark.as_deref().map(|b| {
+        if b.starts_with("tl/") {
+            b.to_string()
+        } else {
+            format!("tl/{}", b)
+        }
+    });
+    let bookmark_ref = bookmark_full.as_deref();
 
     // Execute native git push (now returns detailed results)
     let results = jj::git_ops::native_git_push(&mut workspace, bookmark_ref, all, force)?;

@@ -14,6 +14,121 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 
+/// Export a JJ tree directly into the Timelapse store (no filesystem materialization).
+///
+/// This avoids the tempdir export + re-walk import path, cutting multiple full
+/// disk scans and copies during `tl pull`.
+///
+/// Returns `(root_tree_hash, entries_written)`.
+pub fn export_jj_tree_to_tl_store(
+    jj_store: &Arc<Store>,
+    tree: &MergedTree,
+    tl_store: &tl_core::Store,
+) -> Result<(tl_core::Sha1Hash, u32)> {
+    use tl_core::{Entry, Tree};
+
+    let mut out_tree = Tree::new();
+    let mut entries_written = 0u32;
+
+    // MergedTree.entries() returns Iterator<Item=(RepoPathBuf, BackendResult<MergedTreeValue>)>
+    for (entry_path, merge_value_result) in tree.entries() {
+        let path_str = entry_path.as_internal_file_string();
+
+        // Skip protected directories
+        if path_str.starts_with(".tl/")
+            || path_str.starts_with(".git/")
+            || path_str.starts_with(".jj/")
+        {
+            continue;
+        }
+
+        let merge_value = merge_value_result
+            .with_context(|| format!("Failed to read tree entry: {}", path_str))?;
+
+        let value = match merge_value.as_resolved() {
+            Some(Some(v)) => v,       // Resolved, non-deleted entry
+            Some(None) => continue,   // Resolved but deleted - skip
+            None => continue,         // Conflicted entry - skip
+        };
+
+        match value {
+            TreeValue::File { id, executable, .. } => {
+                let mut content = Vec::new();
+                let mut reader = jj_store
+                    .read_file(&entry_path, id)
+                    .block_on()
+                    .with_context(|| format!("Failed to read file: {}", path_str))?;
+                reader
+                    .read_to_end(&mut content)
+                    .block_on()
+                    .context("Failed to read file content")?;
+
+                let blob_hash = tl_core::hash::git::hash_blob(&content);
+                if !tl_store.blob_store().has_blob(blob_hash) {
+                    tl_store
+                        .blob_store()
+                        .write_blob(blob_hash, &content)
+                        .with_context(|| format!("Failed to write blob: {}", path_str))?;
+                }
+
+                let mode = if *executable { 0o755 } else { 0o644 };
+                out_tree.insert(Path::new(path_str), Entry::file(mode, blob_hash));
+                entries_written += 1;
+            }
+            TreeValue::Symlink(id) => {
+                #[cfg(unix)]
+                {
+                    let target = jj_store
+                        .read_symlink(&entry_path, id)
+                        .block_on()
+                        .with_context(|| format!("Failed to read symlink: {}", path_str))?;
+
+                    let target_bytes = target.as_bytes();
+                    let blob_hash = tl_core::hash::git::hash_blob(target_bytes);
+                    if !tl_store.blob_store().has_blob(blob_hash) {
+                        tl_store
+                            .blob_store()
+                            .write_blob(blob_hash, target_bytes)
+                            .with_context(|| format!("Failed to write symlink blob: {}", path_str))?;
+                    }
+
+                    out_tree.insert(Path::new(path_str), Entry::symlink(blob_hash));
+                    entries_written += 1;
+                }
+
+                #[cfg(not(unix))]
+                {
+                    // Best-effort on non-Unix: store as a normal file containing the target.
+                    let target = jj_store
+                        .read_symlink(&entry_path, id)
+                        .block_on()
+                        .with_context(|| format!("Failed to read symlink: {}", path_str))?;
+                    let target_bytes = target.as_bytes();
+
+                    let blob_hash = tl_core::hash::git::hash_blob(target_bytes);
+                    if !tl_store.blob_store().has_blob(blob_hash) {
+                        tl_store
+                            .blob_store()
+                            .write_blob(blob_hash, target_bytes)
+                            .with_context(|| format!("Failed to write symlink blob: {}", path_str))?;
+                    }
+
+                    out_tree.insert(Path::new(path_str), Entry::file(0o644, blob_hash));
+                    entries_written += 1;
+                }
+            }
+            TreeValue::Tree(_) => unreachable!("MergedTree::entries() should not yield Tree values"),
+            TreeValue::GitSubmodule(_) => {
+                // Submodules aren't supported in the TL store format yet.
+                continue;
+            }
+        }
+    }
+
+    let root_tree = tl_store.write_tree(&out_tree)?;
+    Ok((root_tree, entries_written))
+}
+
 /// Export a JJ tree to a target directory
 ///
 /// Recursively exports all files, symlinks, and subdirectories from a JJ tree

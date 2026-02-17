@@ -170,6 +170,23 @@ pub fn restore_file(store: &Store, file_path: &Path, entry: &Entry) -> Result<()
     // Read blob content
     let content = store.blob_store().read_blob(entry.blob_hash)?;
 
+    // Symlink handling
+    if entry.kind == tl_core::EntryKind::Symlink {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            // Ensure old path doesn't exist; writing a symlink over a file fails.
+            let _ = fs::remove_file(file_path);
+
+            let target = std::str::from_utf8(&content)
+                .with_context(|| format!("Invalid UTF-8 in symlink target: {}", file_path.display()))?;
+            symlink(target, file_path)
+                .with_context(|| format!("Failed to create symlink: {}", file_path.display()))?;
+            return Ok(());
+        }
+    }
+
     // Write file
     fs::write(file_path, content)?;
 

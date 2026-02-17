@@ -96,7 +96,7 @@ pub struct Daemon {
     pathmap: PathMap,
 
     _lock: DaemonLock,
-    ipc_server: IpcServer,
+    ipc_server: Arc<IpcServer>,
 
     shutdown_tx: broadcast::Sender<()>,
     shutdown_rx: broadcast::Receiver<()>,
@@ -121,6 +121,437 @@ impl Daemon {
         // Setup signal handlers
         let mut sigterm = signal(SignalKind::terminate())?;
         let mut sigint = signal(SignalKind::interrupt())?;
+
+        // Run IPC accept loop in a dedicated task so checkpoint creation doesn't
+        // block incoming CLI requests.
+        {
+            let ipc_server = Arc::clone(&self.ipc_server);
+            let journal = Arc::clone(&self.journal);
+            let store = Arc::clone(&self.store);
+            let status = Arc::clone(&self.status);
+            let shutdown_tx = self.shutdown_tx.clone();
+            let flush_tx = self.flush_tx.clone();
+            let checkpoint_count_cache = Arc::clone(&self.checkpoint_count_cache);
+            let mut shutdown_rx = self.shutdown_tx.subscribe();
+
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = shutdown_rx.recv() => {
+                            tracing::info!("IPC accept loop shutting down");
+                            break;
+                        }
+                        result = ipc_server.accept() => {
+                            match result {
+                                Ok(stream) => {
+                                    let journal = Arc::clone(&journal);
+                                    let store = Arc::clone(&store);
+                                    let status = Arc::clone(&status);
+                                    let shutdown_tx = shutdown_tx.clone();
+                                    let flush_tx = flush_tx.clone();
+                                    let checkpoint_count_cache = Arc::clone(&checkpoint_count_cache);
+
+                                    tokio::spawn(async move {
+                                        let handler = |request: IpcRequest| async move {
+                                            match request {
+                                                IpcRequest::GetStatus => {
+                                                    let status = status.read().await.clone();
+                                                    Ok(IpcResponse::Status(status))
+                                                }
+                                                IpcRequest::GetHead => {
+                                                    match journal.latest() {
+                                                        Ok(checkpoint) => Ok(IpcResponse::Head(checkpoint)),
+                                                        Err(e) => Ok(IpcResponse::Error(e.to_string())),
+                                                    }
+                                                }
+                                                IpcRequest::GetCheckpoint(id_str) => {
+                                                    match Ulid::from_string(&id_str) {
+                                                        Ok(id) => {
+                                                            match journal.get(&id) {
+                                                                Ok(checkpoint) => Ok(IpcResponse::Checkpoint(checkpoint)),
+                                                                Err(e) => Ok(IpcResponse::Error(e.to_string())),
+                                                            }
+                                                        }
+                                                        Err(e) => Ok(IpcResponse::Error(e.to_string())),
+                                                    }
+                                                }
+                                                IpcRequest::FlushCheckpoint => {
+                                                    // Request flush from main event loop
+                                                    let (response_tx, response_rx) = oneshot::channel();
+
+                                                    if let Err(_) = flush_tx.send(response_tx).await {
+                                                        return Ok(IpcResponse::Error("Daemon shutting down".to_string()));
+                                                    }
+
+                                                    // Wait for flush to complete
+                                                    match response_rx.await {
+                                                        Ok(Ok(checkpoint_id)) => Ok(IpcResponse::CheckpointFlushed(checkpoint_id)),
+                                                        Ok(Err(e)) => Ok(IpcResponse::Error(e.to_string())),
+                                                        Err(_) => Ok(IpcResponse::Error("Flush request cancelled".to_string())),
+                                                    }
+                                                }
+                                                IpcRequest::ForceCheckpoint => {
+                                                    // Create a proactive checkpoint even with no pending changes
+                                                    let head = match journal.latest() {
+                                                        Ok(Some(cp)) => cp,
+                                                        Ok(None) => {
+                                                            return Ok(IpcResponse::Error(
+                                                                "No checkpoints exist yet. Make a change first to create initial checkpoint.".to_string()
+                                                            ));
+                                                        }
+                                                        Err(e) => return Ok(IpcResponse::Error(e.to_string())),
+                                                    };
+
+                                                    let new_checkpoint = journal::Checkpoint::new(
+                                                        Some(head.id),
+                                                        head.root_tree,
+                                                        journal::CheckpointReason::Manual,
+                                                        vec![],
+                                                        journal::CheckpointMeta {
+                                                            files_changed: 0,
+                                                            bytes_added: 0,
+                                                            bytes_removed: 0,
+                                                        },
+                                                    );
+
+                                                    let checkpoint_id = new_checkpoint.id.to_string();
+
+                                                    if let Err(e) = journal.append(&new_checkpoint) {
+                                                        return Ok(IpcResponse::Error(format!("Failed to create checkpoint: {}", e)));
+                                                    }
+
+                                                    checkpoint_count_cache.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                                                    tracing::info!("Created proactive checkpoint: {}", checkpoint_id);
+                                                    Ok(IpcResponse::CheckpointFlushed(Some(checkpoint_id)))
+                                                }
+                                                IpcRequest::GetCheckpoints { limit, offset } => {
+                                                    let mut checkpoints = Vec::new();
+                                                    let limit = limit.unwrap_or(20);
+                                                    let offset = offset.unwrap_or(0);
+
+                                                    let mut current_id = match journal.latest() {
+                                                        Ok(Some(cp)) => Some(cp.id),
+                                                        Ok(None) => None,
+                                                        Err(e) => return Ok(IpcResponse::Error(e.to_string())),
+                                                    };
+
+                                                    let mut count = 0;
+                                                    while let Some(id) = current_id {
+                                                        if count >= offset + limit {
+                                                            break;
+                                                        }
+
+                                                        match journal.get(&id) {
+                                                            Ok(Some(checkpoint)) => {
+                                                                if count >= offset {
+                                                                    checkpoints.push(checkpoint.clone());
+                                                                }
+                                                                current_id = checkpoint.parent;
+                                                                count += 1;
+                                                            }
+                                                            Ok(None) => break,
+                                                            Err(e) => return Ok(IpcResponse::Error(e.to_string())),
+                                                        }
+                                                    }
+
+                                                    Ok(IpcResponse::Checkpoints(checkpoints))
+                                                }
+                                                IpcRequest::GetCheckpointCount => {
+                                                    let count = checkpoint_count_cache.load(Ordering::Relaxed);
+                                                    Ok(IpcResponse::CheckpointCount(count))
+                                                }
+                                                IpcRequest::GetCheckpointBatch(ids) => {
+                                                    let mut results = Vec::with_capacity(ids.len());
+
+                                                    for id_str in ids {
+                                                        match Ulid::from_string(&id_str) {
+                                                            Ok(id) => {
+                                                                let checkpoint = journal.get(&id).ok().flatten();
+                                                                results.push(checkpoint);
+                                                            }
+                                                            Err(_) => results.push(None),
+                                                        }
+                                                    }
+
+                                                    Ok(IpcResponse::CheckpointBatch(results))
+                                                }
+                                                IpcRequest::GetStatusFull => {
+                                                    let status = status.read().await.clone();
+                                                    let head = match journal.latest() {
+                                                        Ok(checkpoint) => checkpoint,
+                                                        Err(e) => return Ok(IpcResponse::Error(e.to_string())),
+                                                    };
+                                                    let count = checkpoint_count_cache.load(Ordering::Relaxed);
+
+                                                    Ok(IpcResponse::StatusFull {
+                                                        status,
+                                                        head,
+                                                        checkpoint_count: count,
+                                                    })
+                                                }
+                                                IpcRequest::GetLogData { limit, offset } => {
+                                                    let count = checkpoint_count_cache.load(Ordering::Relaxed);
+
+                                                    let mut checkpoints = Vec::new();
+                                                    let limit = limit.unwrap_or(20);
+                                                    let offset = offset.unwrap_or(0);
+
+                                                    let mut current_id = match journal.latest() {
+                                                        Ok(Some(cp)) => Some(cp.id),
+                                                        Ok(None) => None,
+                                                        Err(e) => return Ok(IpcResponse::Error(e.to_string())),
+                                                    };
+
+                                                    let mut idx = 0;
+                                                    while let Some(id) = current_id {
+                                                        if idx >= offset + limit {
+                                                            break;
+                                                        }
+
+                                                        match journal.get(&id) {
+                                                            Ok(Some(checkpoint)) => {
+                                                                if idx >= offset {
+                                                                    checkpoints.push(checkpoint.clone());
+                                                                }
+                                                                current_id = checkpoint.parent;
+                                                                idx += 1;
+                                                            }
+                                                            Ok(None) => break,
+                                                            Err(e) => return Ok(IpcResponse::Error(e.to_string())),
+                                                        }
+                                                    }
+
+                                                    Ok(IpcResponse::LogData { count, checkpoints })
+                                                }
+                                                IpcRequest::ResolveCheckpointRefs(refs) => {
+                                                    let tl_dir = store.tl_dir();
+                                                    let pin_manager = journal::PinManager::new(&tl_dir);
+                                                    let mut results = Vec::new();
+
+                                                    for checkpoint_ref in refs {
+                                                        if checkpoint_ref == "HEAD" {
+                                                            match journal.latest() {
+                                                                Ok(Some(cp)) => {
+                                                                    results.push(Some(cp));
+                                                                    continue;
+                                                                }
+                                                                Ok(None) | Err(_) => {
+                                                                    results.push(None);
+                                                                    continue;
+                                                                }
+                                                            }
+                                                        }
+
+                                                        if checkpoint_ref.starts_with("HEAD~") {
+                                                            if let Some(n_str) = checkpoint_ref.strip_prefix("HEAD~") {
+                                                                if let Ok(n) = n_str.parse::<usize>() {
+                                                                    let mut current = journal.latest().ok().flatten();
+                                                                    for _ in 0..n {
+                                                                        if let Some(cp) = &current {
+                                                                            if let Some(parent_id) = cp.parent {
+                                                                                current = journal.get(&parent_id).ok().flatten();
+                                                                            } else {
+                                                                                current = None;
+                                                                                break;
+                                                                            }
+                                                                        } else {
+                                                                            break;
+                                                                        }
+                                                                    }
+                                                                    results.push(current);
+                                                                    continue;
+                                                                }
+                                                            }
+                                                            results.push(None);
+                                                            continue;
+                                                        }
+
+                                                        if let Ok(ulid) = Ulid::from_string(&checkpoint_ref) {
+                                                            match journal.get(&ulid) {
+                                                                Ok(Some(cp)) => {
+                                                                    results.push(Some(cp));
+                                                                    continue;
+                                                                }
+                                                                _ => {}
+                                                            }
+                                                        }
+
+                                                        if checkpoint_ref.len() >= 4 {
+                                                            let all_ids = match journal.all_checkpoint_ids() {
+                                                                Ok(ids) => ids,
+                                                                Err(e) => return Ok(IpcResponse::Error(e.to_string())),
+                                                            };
+
+                                                            let matching: Vec<_> = all_ids
+                                                                .iter()
+                                                                .filter(|id| id.to_string().starts_with(&checkpoint_ref))
+                                                                .collect();
+
+                                                            if matching.len() == 1 {
+                                                                match journal.get(matching[0]) {
+                                                                    Ok(Some(cp)) => {
+                                                                        results.push(Some(cp));
+                                                                        continue;
+                                                                    }
+                                                                    _ => {}
+                                                                }
+                                                            } else if matching.len() > 1 {
+                                                                results.push(None);
+                                                                continue;
+                                                            }
+                                                        }
+
+                                                        match pin_manager.list_pins() {
+                                                            Ok(pins) => {
+                                                                if let Some((_, ulid)) = pins.iter().find(|(name, _)| name == &checkpoint_ref) {
+                                                                    match journal.get(ulid) {
+                                                                        Ok(Some(cp)) => {
+                                                                            results.push(Some(cp));
+                                                                            continue;
+                                                                        }
+                                                                        _ => {}
+                                                                    }
+                                                                }
+                                                            }
+                                                            _ => {}
+                                                        }
+
+                                                        results.push(None);
+                                                    }
+
+                                                    Ok(IpcResponse::ResolvedCheckpoints(results))
+                                                }
+                                                IpcRequest::GetInfoData => {
+                                                    let total_checkpoints = checkpoint_count_cache.load(Ordering::Relaxed);
+
+                                                    let checkpoint_ids = match journal.all_checkpoint_ids() {
+                                                        Ok(ids) => ids.iter().map(|id| id.to_string()).collect(),
+                                                        Err(e) => return Ok(IpcResponse::Error(e.to_string())),
+                                                    };
+
+                                                    let store_path = store.tl_dir().join("store");
+                                                    let store_size_bytes = calculate_dir_size(&store_path).unwrap_or(0);
+
+                                                    Ok(IpcResponse::InfoData {
+                                                        total_checkpoints,
+                                                        checkpoint_ids,
+                                                        store_size_bytes,
+                                                    })
+                                                }
+                                                IpcRequest::ImportRemoteCommit { commit_id, no_pin } => {
+                                                    // Idempotent import: if we already imported this JJ commit, return the existing checkpoint.
+                                                    let tl_dir = store.tl_dir().to_path_buf();
+                                                    let mapping = match jj::JjMapping::open(&tl_dir) {
+                                                        Ok(m) => m,
+                                                        Err(e) => return Ok(IpcResponse::Error(e.to_string())),
+                                                    };
+
+                                                    if let Ok(Some(existing_id)) = mapping.get_checkpoint(&commit_id) {
+                                                        match journal.get(&existing_id) {
+                                                            Ok(Some(cp)) => {
+                                                                return Ok(IpcResponse::ImportedCommit {
+                                                                    checkpoint: cp,
+                                                                    already_present: true,
+                                                                });
+                                                            }
+                                                            Ok(None) => {
+                                                                // Mapping exists but journal doesn't; fall through to re-import.
+                                                                tracing::warn!("Mapping for commit {} points to missing checkpoint {}", commit_id, existing_id);
+                                                            }
+                                                            Err(e) => return Ok(IpcResponse::Error(e.to_string())),
+                                                        }
+                                                    }
+
+                                                    // Import JJ commit tree directly into TL store (no tempdir export + re-walk).
+                                                    let repo_root = store.root().to_path_buf();
+                                                    let workspace = match jj::load_workspace(&repo_root) {
+                                                        Ok(ws) => ws,
+                                                        Err(e) => return Ok(IpcResponse::Error(e.to_string())),
+                                                    };
+
+                                                    let (root_tree, files_changed) =
+                                                        match jj::git_ops::export_commit_to_tl_store(&workspace, &commit_id, &store) {
+                                                            Ok(v) => v,
+                                                            Err(e) => return Ok(IpcResponse::Error(e.to_string())),
+                                                        };
+
+                                                    let parent = match journal.latest() {
+                                                        Ok(v) => v.map(|cp| cp.id),
+                                                        Err(e) => return Ok(IpcResponse::Error(e.to_string())),
+                                                    };
+
+                                                    let checkpoint = journal::Checkpoint::new(
+                                                        parent,
+                                                        root_tree,
+                                                        journal::CheckpointReason::Publish,
+                                                        vec![],
+                                                        journal::CheckpointMeta {
+                                                            files_changed,
+                                                            bytes_added: 0,
+                                                            bytes_removed: 0,
+                                                        },
+                                                    );
+
+                                                    if let Err(e) = journal.append(&checkpoint) {
+                                                        return Ok(IpcResponse::Error(e.to_string()));
+                                                    }
+                                                    checkpoint_count_cache.fetch_add(1, Ordering::Relaxed);
+
+                                                    // Store bidirectional mapping.
+                                                    if let Err(e) = mapping.set(checkpoint.id, &commit_id) {
+                                                        return Ok(IpcResponse::Error(e.to_string()));
+                                                    }
+                                                    if let Err(e) = mapping.set_reverse(&commit_id, checkpoint.id) {
+                                                        return Ok(IpcResponse::Error(e.to_string()));
+                                                    }
+
+                                                    // Auto-pin if requested.
+                                                    if !no_pin {
+                                                        let pin_manager = journal::PinManager::new(&tl_dir);
+                                                        if let Err(e) = pin_manager.pin("pulled", checkpoint.id) {
+                                                            return Ok(IpcResponse::Error(e.to_string()));
+                                                        }
+                                                    }
+
+                                                    Ok(IpcResponse::ImportedCommit {
+                                                        checkpoint,
+                                                        already_present: false,
+                                                    })
+                                                }
+                                                IpcRequest::Shutdown => {
+                                                    let _ = shutdown_tx.send(());
+                                                    Ok(IpcResponse::Ok)
+                                                }
+                                                IpcRequest::InvalidatePathmap => {
+                                                    tracing::info!("Pathmap invalidation requested - will rebuild from HEAD");
+
+                                                    let marker_path = store.tl_dir().join("state/pathmap_stale");
+                                                    if let Err(e) = std::fs::write(&marker_path, "stale") {
+                                                        return Ok(IpcResponse::Error(format!("Failed to mark pathmap stale: {}", e)));
+                                                    }
+
+                                                    Ok(IpcResponse::Ok)
+                                                }
+                                            }
+                                        };
+
+                                        if let Err(e) = handle_connection(stream, handler).await {
+                                            // Unexpected EOF is handled as Ok(()) in handle_connection.
+                                            tracing::error!("IPC connection error: {}", e);
+                                        }
+                                    });
+                                }
+                                Err(e) => {
+                                    tracing::error!("IPC accept error: {}", e);
+                                    tokio::time::sleep(Duration::from_millis(100)).await;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
 
         // Debouncing state - load any pending paths from previous crash
         let tl_dir = self.store.tl_dir().to_path_buf();
@@ -313,365 +744,6 @@ impl Daemon {
                     last_gc = Instant::now();
                 }
 
-                // Handle IPC connections
-                result = self.ipc_server.accept() => {
-                    match result {
-                        Ok(stream) => {
-                            let journal = Arc::clone(&self.journal);
-                            let store = Arc::clone(&self.store);
-                            let status = Arc::clone(&self.status);
-                            let shutdown_tx = self.shutdown_tx.clone();
-                            let flush_tx = self.flush_tx.clone();
-                            let checkpoint_count_cache = Arc::clone(&self.checkpoint_count_cache);
-
-                            tokio::spawn(async move {
-                                let handler = |request: IpcRequest| async move {
-                                    match request {
-                                IpcRequest::GetStatus => {
-                                    let status = status.read().await.clone();
-                                    Ok(IpcResponse::Status(status))
-                                }
-                                IpcRequest::GetHead => {
-                                    match journal.latest() {
-                                        Ok(checkpoint) => Ok(IpcResponse::Head(checkpoint)),
-                                        Err(e) => Ok(IpcResponse::Error(e.to_string())),
-                                    }
-                                }
-                                IpcRequest::GetCheckpoint(id_str) => {
-                                    match Ulid::from_string(&id_str) {
-                                        Ok(id) => {
-                                            match journal.get(&id) {
-                                                Ok(checkpoint) => Ok(IpcResponse::Checkpoint(checkpoint)),
-                                                Err(e) => Ok(IpcResponse::Error(e.to_string())),
-                                            }
-                                        }
-                                        Err(e) => Ok(IpcResponse::Error(e.to_string())),
-                                    }
-                                }
-                                IpcRequest::FlushCheckpoint => {
-                                    // Request flush from main event loop
-                                    let (response_tx, response_rx) = oneshot::channel();
-
-                                    if let Err(_) = flush_tx.send(response_tx).await {
-                                        return Ok(IpcResponse::Error("Daemon shutting down".to_string()));
-                                    }
-
-                                    // Wait for flush to complete
-                                    match response_rx.await {
-                                        Ok(Ok(checkpoint_id)) => Ok(IpcResponse::CheckpointFlushed(checkpoint_id)),
-                                        Ok(Err(e)) => Ok(IpcResponse::Error(e.to_string())),
-                                        Err(_) => Ok(IpcResponse::Error("Flush request cancelled".to_string())),
-                                    }
-                                }
-                                IpcRequest::ForceCheckpoint => {
-                                    // Create a proactive checkpoint even with no pending changes
-                                    // This captures the current HEAD state as a new checkpoint for
-                                    // "restore point" semantics - useful before risky operations
-
-                                    // Get current HEAD checkpoint
-                                    let head = match journal.latest() {
-                                        Ok(Some(cp)) => cp,
-                                        Ok(None) => {
-                                            return Ok(IpcResponse::Error(
-                                                "No checkpoints exist yet. Make a change first to create initial checkpoint.".to_string()
-                                            ));
-                                        }
-                                        Err(e) => return Ok(IpcResponse::Error(e.to_string())),
-                                    };
-
-                                    // Create a new checkpoint with the same tree but new ID and timestamp
-                                    // This is a "proactive" checkpoint - marking a point in time
-                                    let new_checkpoint = journal::Checkpoint::new(
-                                        Some(head.id),
-                                        head.root_tree,
-                                        journal::CheckpointReason::Manual,
-                                        vec![], // No touched paths - this is a snapshot
-                                        journal::CheckpointMeta {
-                                            files_changed: 0,
-                                            bytes_added: 0,
-                                            bytes_removed: 0,
-                                        },
-                                    );
-
-                                    let checkpoint_id = new_checkpoint.id.to_string();
-
-                                    // Append to journal
-                                    if let Err(e) = journal.append(&new_checkpoint) {
-                                        return Ok(IpcResponse::Error(format!("Failed to create checkpoint: {}", e)));
-                                    }
-
-                                    // Update checkpoint count cache
-                                    checkpoint_count_cache.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-                                    tracing::info!("Created proactive checkpoint: {}", checkpoint_id);
-                                    Ok(IpcResponse::CheckpointFlushed(Some(checkpoint_id)))
-                                }
-                                IpcRequest::GetCheckpoints { limit, offset } => {
-                                    let mut checkpoints = Vec::new();
-                                    let limit = limit.unwrap_or(20);
-                                    let offset = offset.unwrap_or(0);
-
-                                    // Walk journal from HEAD backwards
-                                    let mut current_id = match journal.latest() {
-                                        Ok(Some(cp)) => Some(cp.id),
-                                        Ok(None) => None,
-                                        Err(e) => return Ok(IpcResponse::Error(e.to_string())),
-                                    };
-
-                                    let mut count = 0;
-                                    while let Some(id) = current_id {
-                                        if count >= offset + limit {
-                                            break;
-                                        }
-
-                                        match journal.get(&id) {
-                                            Ok(Some(checkpoint)) => {
-                                                if count >= offset {
-                                                    checkpoints.push(checkpoint.clone());
-                                                }
-                                                current_id = checkpoint.parent;
-                                                count += 1;
-                                            }
-                                            Ok(None) => break,
-                                            Err(e) => return Ok(IpcResponse::Error(e.to_string())),
-                                        }
-                                    }
-
-                                    Ok(IpcResponse::Checkpoints(checkpoints))
-                                }
-                                IpcRequest::GetCheckpointCount => {
-                                    // Use cached count for O(1) performance
-                                    let count = checkpoint_count_cache.load(Ordering::Relaxed);
-                                    Ok(IpcResponse::CheckpointCount(count))
-                                }
-                                IpcRequest::GetCheckpointBatch(ids) => {
-                                    // Batch fetch multiple checkpoints in one IPC call
-                                    let mut results = Vec::with_capacity(ids.len());
-
-                                    for id_str in ids {
-                                        match Ulid::from_string(&id_str) {
-                                            Ok(id) => {
-                                                let checkpoint = journal.get(&id).ok().flatten();
-                                                results.push(checkpoint);
-                                            }
-                                            Err(_) => results.push(None),
-                                        }
-                                    }
-
-                                    Ok(IpcResponse::CheckpointBatch(results))
-                                }
-                                IpcRequest::GetStatusFull => {
-                                    // Get all data in one atomic operation
-                                    let status = status.read().await.clone();
-                                    let head = match journal.latest() {
-                                        Ok(checkpoint) => checkpoint,
-                                        Err(e) => return Ok(IpcResponse::Error(e.to_string())),
-                                    };
-                                    let count = checkpoint_count_cache.load(Ordering::Relaxed);
-
-                                    Ok(IpcResponse::StatusFull {
-                                        status,
-                                        head,
-                                        checkpoint_count: count,
-                                    })
-                                }
-                                IpcRequest::GetLogData { limit, offset } => {
-                                    // Get count and checkpoints in one call
-                                    let count = checkpoint_count_cache.load(Ordering::Relaxed);
-
-                                    // Get checkpoints (same logic as GetCheckpoints)
-                                    let mut checkpoints = Vec::new();
-                                    let limit = limit.unwrap_or(20);
-                                    let offset = offset.unwrap_or(0);
-
-                                    // Walk journal from HEAD backwards
-                                    let mut current_id = match journal.latest() {
-                                        Ok(Some(cp)) => Some(cp.id),
-                                        Ok(None) => None,
-                                        Err(e) => return Ok(IpcResponse::Error(e.to_string())),
-                                    };
-
-                                    let mut idx = 0;
-                                    while let Some(id) = current_id {
-                                        if idx >= offset + limit {
-                                            break;
-                                        }
-
-                                        match journal.get(&id) {
-                                            Ok(Some(checkpoint)) => {
-                                                if idx >= offset {
-                                                    checkpoints.push(checkpoint.clone());
-                                                }
-                                                current_id = checkpoint.parent;
-                                                idx += 1;
-                                            }
-                                            Ok(None) => break,
-                                            Err(e) => return Ok(IpcResponse::Error(e.to_string())),
-                                        }
-                                    }
-
-                                    Ok(IpcResponse::LogData { count, checkpoints })
-                                }
-                                IpcRequest::ResolveCheckpointRefs(refs) => {
-                                    // Resolve each reference (full ULID, short prefix, or pin name)
-                                    let tl_dir = store.tl_dir();
-                                    let pin_manager = journal::PinManager::new(&tl_dir);
-                                    let mut results = Vec::new();
-
-                                    for checkpoint_ref in refs {
-                                        // Handle HEAD alias
-                                        if checkpoint_ref == "HEAD" {
-                                            match journal.latest() {
-                                                Ok(Some(cp)) => {
-                                                    results.push(Some(cp));
-                                                    continue;
-                                                }
-                                                Ok(None) | Err(_) => {
-                                                    results.push(None);
-                                                    continue;
-                                                }
-                                            }
-                                        }
-
-                                        // Handle HEAD~N syntax (N checkpoints before HEAD)
-                                        if checkpoint_ref.starts_with("HEAD~") {
-                                            if let Some(n_str) = checkpoint_ref.strip_prefix("HEAD~") {
-                                                if let Ok(n) = n_str.parse::<usize>() {
-                                                    // Walk back N checkpoints from HEAD
-                                                    let mut current = journal.latest().ok().flatten();
-                                                    for _ in 0..n {
-                                                        if let Some(cp) = &current {
-                                                            if let Some(parent_id) = cp.parent {
-                                                                current = journal.get(&parent_id).ok().flatten();
-                                                            } else {
-                                                                current = None;
-                                                                break;
-                                                            }
-                                                        } else {
-                                                            break;
-                                                        }
-                                                    }
-                                                    results.push(current);
-                                                    continue;
-                                                }
-                                            }
-                                            results.push(None); // Invalid HEAD~N format
-                                            continue;
-                                        }
-
-                                        // Try full ULID first
-                                        if let Ok(ulid) = Ulid::from_string(&checkpoint_ref) {
-                                            match journal.get(&ulid) {
-                                                Ok(Some(cp)) => {
-                                                    results.push(Some(cp));
-                                                    continue;
-                                                }
-                                                _ => {}
-                                            }
-                                        }
-
-                                        // Try short prefix (4+ chars)
-                                        if checkpoint_ref.len() >= 4 {
-                                            let all_ids = match journal.all_checkpoint_ids() {
-                                                Ok(ids) => ids,
-                                                Err(e) => return Ok(IpcResponse::Error(e.to_string())),
-                                            };
-
-                                            let matching: Vec<_> = all_ids
-                                                .iter()
-                                                .filter(|id| id.to_string().starts_with(&checkpoint_ref))
-                                                .collect();
-
-                                            if matching.len() == 1 {
-                                                match journal.get(matching[0]) {
-                                                    Ok(Some(cp)) => {
-                                                        results.push(Some(cp));
-                                                        continue;
-                                                    }
-                                                    _ => {}
-                                                }
-                                            } else if matching.len() > 1 {
-                                                results.push(None); // Ambiguous
-                                                continue;
-                                            }
-                                        }
-
-                                        // Try pin name
-                                        match pin_manager.list_pins() {
-                                            Ok(pins) => {
-                                                if let Some((_, ulid)) = pins.iter().find(|(name, _)| name == &checkpoint_ref) {
-                                                    match journal.get(ulid) {
-                                                        Ok(Some(cp)) => {
-                                                            results.push(Some(cp));
-                                                            continue;
-                                                        }
-                                                        _ => {}
-                                                    }
-                                                }
-                                            }
-                                            _ => {}
-                                        }
-
-                                        // Not found
-                                        results.push(None);
-                                    }
-
-                                    Ok(IpcResponse::ResolvedCheckpoints(results))
-                                }
-                                IpcRequest::GetInfoData => {
-                                    // Get checkpoint count from cache
-                                    let total_checkpoints = checkpoint_count_cache.load(Ordering::Relaxed);
-
-                                    // Get all checkpoint IDs
-                                    let checkpoint_ids = match journal.all_checkpoint_ids() {
-                                        Ok(ids) => ids.iter().map(|id| id.to_string()).collect(),
-                                        Err(e) => return Ok(IpcResponse::Error(e.to_string())),
-                                    };
-
-                                    // Calculate store size
-                                    let store_path = store.tl_dir().join("store");
-                                    let store_size_bytes = calculate_dir_size(&store_path).unwrap_or(0);
-
-                                    Ok(IpcResponse::InfoData {
-                                        total_checkpoints,
-                                        checkpoint_ids,
-                                        store_size_bytes,
-                                    })
-                                }
-                                IpcRequest::Shutdown => {
-                                    // Signal shutdown
-                                    let _ = shutdown_tx.send(());
-                                    Ok(IpcResponse::Ok)
-                                }
-                                IpcRequest::InvalidatePathmap => {
-                                    // Mark pathmap as needing rebuild
-                                    // This is called after restore operations modify the working directory
-                                    tracing::info!("Pathmap invalidation requested - will rebuild from HEAD");
-
-                                    // Write a marker file that the daemon checks on next checkpoint
-                                    let marker_path = store.tl_dir().join("state/pathmap_stale");
-                                    if let Err(e) = std::fs::write(&marker_path, "stale") {
-                                        return Ok(IpcResponse::Error(format!("Failed to mark pathmap stale: {}", e)));
-                                    }
-
-                                    Ok(IpcResponse::Ok)
-                                }
-                            }
-                        };
-
-                            if let Err(e) = handle_connection(stream, handler).await {
-                                tracing::error!("IPC connection error: {}", e);
-                            }
-                        });
-                        }
-                        Err(e) => {
-                            tracing::error!("IPC accept error: {}", e);
-                            // Small delay to prevent tight loop if accept keeps failing
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                        }
-                    }
-                }
-
                 // Shutdown signals
                 _ = sigterm.recv() => {
                     tracing::info!("Received SIGTERM, shutting down");
@@ -832,9 +904,13 @@ pub(crate) async fn start_background_internal(repo_root: &Path) -> Result<()> {
     let exe = std::env::current_exe()
         .context("Failed to get current executable path")?;
 
-    // Spawn daemon in background with nohup
-    let log_file_writer = std::fs::File::create(&log_file)
-        .context("Failed to create log file")?;
+    // Spawn daemon in background with nohup.
+    // Append instead of truncating so repeated start attempts don't destroy logs.
+    let log_file_writer = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_file)
+        .context("Failed to open log file")?;
 
     let mut cmd = Command::new("nohup");
     cmd.arg(&exe)
@@ -860,18 +936,21 @@ pub(crate) async fn start_background_internal(repo_root: &Path) -> Result<()> {
 
 /// Ensure daemon is running, auto-start if needed (default 1s timeout)
 pub async fn ensure_daemon_running() -> Result<()> {
-    ensure_daemon_running_with_timeout(1).await
+    // Daemon startup commonly takes 1-2s on macOS due to watcher initialization.
+    // Use a slightly more forgiving default to avoid false negatives.
+    ensure_daemon_running_with_timeout(5).await
 }
 
 /// Ensure daemon is running with configurable timeout
 pub async fn ensure_daemon_running_with_timeout(timeout_secs: u64) -> Result<()> {
-    // Check if daemon is already running
-    if is_running().await {
-        return Ok(());
-    }
-
     // Find repo root
     let repo_root = util::find_repo_root()?;
+    let tl_dir = repo_root.join(".tl");
+
+    // Check if daemon is already running (quick liveness check).
+    if is_running_impl(&tl_dir).await {
+        return Ok(());
+    }
 
     // Start daemon in background
     start_background_internal(&repo_root).await?;
@@ -881,7 +960,7 @@ pub async fn ensure_daemon_running_with_timeout(timeout_secs: u64) -> Result<()>
     let start = Instant::now();
 
     while start.elapsed() < timeout {
-        if is_running().await {
+        if is_running_impl(&tl_dir).await {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -922,7 +1001,10 @@ async fn start_daemon_direct(repo_root: &Path) -> Result<()> {
 
     // 2. Check if already running
     if is_running_impl(&tl_dir).await {
-        anyhow::bail!("Daemon already running");
+        // If another daemon is already running, treat this as a no-op.
+        // This avoids supervisor restart loops and makes start idempotent.
+        tracing::info!("Daemon already running");
+        return Ok(());
     }
 
     // 3. Acquire daemon lock
@@ -970,9 +1052,11 @@ async fn start_daemon_direct(repo_root: &Path) -> Result<()> {
 
     // 7. Start IPC server
     let socket_path = tl_dir.join("state/daemon.sock");
-    let ipc_server = IpcServer::start(&socket_path)
-        .await
-        .context("Failed to start IPC server")?;
+    let ipc_server = Arc::new(
+        IpcServer::start(&socket_path)
+            .await
+            .context("Failed to start IPC server")?
+    );
 
     // 8. Create and run daemon
     let daemon = Daemon {
@@ -999,6 +1083,7 @@ async fn start_daemon_direct(repo_root: &Path) -> Result<()> {
 /// Stop the Timelapse daemon
 pub async fn stop() -> Result<()> {
     let repo_root = util::find_repo_root()?;
+    let tl_dir = repo_root.join(".tl");
     let socket_path = repo_root.join(".tl/state/daemon.sock");
 
     // Check if daemon is running
@@ -1007,9 +1092,23 @@ pub async fn stop() -> Result<()> {
         return Ok(());
     }
 
-    // Connect and send shutdown
-    let mut client = crate::ipc::IpcClient::connect(&socket_path).await?;
-    client.shutdown().await?;
+    // Connect and send shutdown.
+    // If the socket is stale (daemon crashed), clean it up and return success.
+    match crate::ipc::IpcClient::connect(&socket_path).await {
+        Ok(mut client) => {
+            client.shutdown().await?;
+        }
+        Err(e) => {
+            let lock_path = tl_dir.join("locks/daemon.lock");
+            if is_stale_daemon_lock(&lock_path) {
+                let _ = std::fs::remove_file(&socket_path);
+                let _ = std::fs::remove_file(&lock_path);
+                println!("Daemon is not running");
+                return Ok(());
+            }
+            return Err(e);
+        }
+    }
 
     // Wait for daemon to exit (poll lock file)
     let lock_path = repo_root.join(".tl/locks/daemon.lock");
@@ -1029,6 +1128,45 @@ pub async fn stop() -> Result<()> {
     Ok(())
 }
 
+fn is_stale_daemon_lock(lock_path: &Path) -> bool {
+    #[derive(serde::Deserialize)]
+    struct LockContent {
+        pid: u32,
+    }
+
+    let contents = match std::fs::read_to_string(lock_path) {
+        Ok(s) => s,
+        Err(_) => return true,
+    };
+    let pid = match serde_json::from_str::<LockContent>(&contents) {
+        Ok(c) => c.pid,
+        Err(_) => return true,
+    };
+
+    // macOS/Linux parity with locks.rs implementation
+    #[cfg(target_os = "macos")]
+    {
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
+        match kill(Pid::from_raw(pid as i32), None) {
+            Ok(_) => false,
+            Err(nix::errno::Errno::ESRCH) => true,
+            Err(_) => false, // assume alive on EPERM, etc.
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        std::path::Path::new(&format!("/proc/{}", pid)).exists() == false
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        // Conservative on unknown platforms: don't delete locks/sockets.
+        false
+    }
+}
+
 /// Check if daemon is running
 pub async fn is_running() -> bool {
     match util::find_repo_root() {
@@ -1046,10 +1184,21 @@ async fn is_running_impl(tl_dir: &Path) -> bool {
         return false;
     }
 
-    // Verify we can connect to IPC
-    match crate::ipc::IpcClient::connect(&socket_path).await {
-        Ok(_) => true,
-        Err(_) => false,
+    // Verify IPC by sending a real request with a short timeout.
+    // This keeps `ensure_daemon_running()` bounded even if the socket exists
+    // but the daemon is wedged or restarting.
+    let connect = tokio::time::timeout(Duration::from_millis(200), crate::ipc::IpcClient::connect(&socket_path)).await;
+    let mut client = match connect {
+        Ok(Ok(c)) => c,
+        _ => return false,
+    };
+
+    match client
+        .send_request_with_timeout(&crate::ipc::IpcRequest::GetStatus, Duration::from_millis(200))
+        .await
+    {
+        Ok(crate::ipc::IpcResponse::Status(_)) => true,
+        _ => false,
     }
 }
 

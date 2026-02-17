@@ -10,8 +10,8 @@
 
 use anyhow::{Context, Result};
 use crate::util;
-use crate::cmd::restore::{restore_tree, RestoreResult};
-use journal::{Checkpoint, CheckpointMeta, CheckpointReason, Journal, StashEntry, StashManager};
+use crate::cmd::restore::restore_tree;
+use journal::{Checkpoint, StashEntry, StashManager};
 use owo_colors::OwoColorize;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -36,25 +36,21 @@ pub async fn run(
     // 3. Open components
     let store = Store::open(&repo_root)
         .context("Failed to open Timelapse store")?;
-    let journal = Journal::open(&tl_dir)
-        .context("Failed to open journal")?;
     let stash_manager = StashManager::new(&tl_dir);
-    let mapping = jj::JjMapping::open(&tl_dir)
-        .context("Failed to open JJ mapping")?;
 
     // 4. Check for uncommitted changes and auto-stash
     let stash_entry = if !fetch_only {
-        check_and_auto_stash(&repo_root, &store, &journal, &stash_manager).await?
+        check_and_auto_stash(&tl_dir, &stash_manager).await?
     } else {
         None
     };
 
-    // 5. Fetch from remote using native git API
+    // 5. Fetch from remote using latency-optimized refspec selection
     println!("{}", "Fetching from Git remote...".dimmed());
     let mut workspace = jj::load_workspace(&repo_root)
         .context("Failed to load JJ workspace")?;
 
-    jj::git_ops::native_git_fetch(&mut workspace)?;
+    jj::git_ops::native_git_fetch_for_pull(&mut workspace)?;
     println!("{} Fetched from remote", "✓".green());
 
     // If fetch-only mode, stop here
@@ -64,75 +60,55 @@ pub async fn run(
         return Ok(());
     }
 
-    // 6. Get remote branch updates
-    let remote_branches = jj::git_ops::get_remote_branch_updates(&workspace)?;
-
-    // Find the primary branch to sync to (prefer main, then master, then first available)
-    let sync_branch = remote_branches.iter()
-        .find(|b| b.name == "main")
-        .or_else(|| remote_branches.iter().find(|b| b.name == "master"))
-        .or_else(|| remote_branches.first());
-
-    let sync_branch = match sync_branch {
-        Some(b) => b,
-        None => {
-            println!("{}", "No branches found on remote.".dimmed());
-            // Try to re-apply stash even if no remote branches
-            if let Some(stash) = stash_entry {
-                reapply_stash(&repo_root, &store, &journal, &stash_manager, stash).await?;
+    // 6. Choose sync target quickly (prefer main/master, else first remote bookmark)
+    let (_sync_branch_name, remote_commit_id) =
+        match jj::git_ops::get_preferred_remote_head(&workspace, &["main", "master"])? {
+            Some(v) => v,
+            None => {
+                println!("{}", "No branches found on remote.".dimmed());
+                if let Some(stash) = stash_entry {
+                    reapply_stash(&repo_root, &tl_dir, &store, &stash_manager, stash).await?;
+                }
+                return Ok(());
             }
-            return Ok(());
-        }
-    };
+        };
 
-    let remote_commit_id = match &sync_branch.remote_commit_id {
-        Some(id) => id.clone(),
-        None => {
-            println!("{} Remote branch {} has no commit", "!".yellow(), sync_branch.name);
-            if let Some(stash) = stash_entry {
-                reapply_stash(&repo_root, &store, &journal, &stash_manager, stash).await?;
-            }
-            return Ok(());
-        }
-    };
+    // 7. Import remote commit as checkpoint via the daemon (journal is daemon-owned).
+    let imported = import_remote_commit_via_daemon(&tl_dir, &remote_commit_id, no_pin).await?;
 
-    // 7. Check if already imported
-    if let Some(checkpoint_id) = mapping.get_checkpoint(&remote_commit_id)? {
-        let short_id = &checkpoint_id.to_string()[..8];
-        println!("{} Already up to date (checkpoint {})", "✓".green(),
-            short_id.bright_cyan());
+    if imported.already_present {
+        let short_id = &imported.checkpoint.id.to_string()[..8];
+        println!(
+            "{} Already up to date (checkpoint {})",
+            "✓".green(),
+            short_id.bright_cyan()
+        );
     } else {
-        // 8. Import remote commit as checkpoint
         println!();
         println!("{}", "Importing remote changes...".dimmed());
 
-        let checkpoint = import_remote_commit(
-            &workspace,
-            &remote_commit_id,
-            &store,
-            &journal,
-            &mapping,
-            no_pin,
-            &tl_dir,
-        )?;
-
         let short_commit = &remote_commit_id[..12.min(remote_commit_id.len())];
-        let short_cp_id = &checkpoint.id.to_string()[..8];
-        println!("{} Imported {} as checkpoint {}",
+        let short_cp_id = &imported.checkpoint.id.to_string()[..8];
+        println!(
+            "{} Imported {} as checkpoint {}",
             "✓".green(),
             short_commit.bright_yellow(),
             short_cp_id.bright_cyan()
         );
 
-        // 9. Sync working directory to imported checkpoint
+        // 8. Sync working directory to imported checkpoint
         // Note: delete_extra=false to preserve local files (Git-like behavior)
         println!();
         println!("{}", "Syncing working directory...".dimmed());
 
-        let tree = store.read_tree(checkpoint.root_tree)?;
+        let tree = store.read_tree(imported.checkpoint.root_tree)?;
         let result = restore_tree(&store, &tree, &repo_root, false)?;
 
-        println!("{} Synced {} files", "✓".green(), result.files_restored.to_string().green());
+        println!(
+            "{} Synced {} files",
+            "✓".green(),
+            result.files_restored.to_string().green()
+        );
         if !result.errors.is_empty() {
             println!("{} {} errors during sync", "!".yellow(), result.errors.len());
             for err in result.errors.iter().take(3) {
@@ -154,7 +130,7 @@ pub async fn run(
 
     // 10. Re-apply stash if we had uncommitted changes
     if let Some(stash) = stash_entry {
-        reapply_stash(&repo_root, &store, &journal, &stash_manager, stash).await?;
+        reapply_stash(&repo_root, &tl_dir, &store, &stash_manager, stash).await?;
     }
 
     println!();
@@ -163,315 +139,140 @@ pub async fn run(
     Ok(())
 }
 
-/// Check for uncommitted changes and auto-stash if found
+/// Check for uncommitted changes and auto-stash if found.
+///
+/// Production behavior:
+/// - Never does a full filesystem scan in the CLI (latency).
+/// - Instead, asks the daemon to flush pending watcher events into a checkpoint.
+/// - Retries briefly to cover watcher latency windows.
 async fn check_and_auto_stash(
-    repo_root: &Path,
-    store: &Store,
-    journal: &Journal,
+    tl_dir: &Path,
     stash_manager: &StashManager,
 ) -> Result<Option<StashEntry>> {
-    // Get latest checkpoint
-    let latest = match journal.latest()? {
-        Some(cp) => cp,
-        None => return Ok(None), // No checkpoints yet, nothing to stash
-    };
+    let socket_path = tl_dir.join("state/daemon.sock");
+    let resilient = crate::ipc::ResilientIpcClient::new(socket_path);
 
-    // Check if working directory differs from latest checkpoint
-    let has_changes = check_working_dir_changes(repo_root, store, &latest)?;
-
-    if !has_changes {
-        return Ok(None);
-    }
-
-    println!("{}", "Auto-stashing uncommitted changes...".dimmed());
-
-    // Force a checkpoint of current state
-    // The daemon will create this, but we need to wait for it
-    // For now, we'll create a manual checkpoint
-    let stash_checkpoint = create_stash_checkpoint(repo_root, store, journal)?;
-
-    // Create stash entry
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)?
-        .as_millis() as u64;
-
-    let entry = StashEntry {
-        checkpoint_id: stash_checkpoint.id,
-        created_at_ms: now_ms,
-        message: Some("Auto-stash before pull".to_string()),
-        base_checkpoint_id: latest.parent,
-    };
-
-    stash_manager.push(entry.clone())?;
-
-    let short_stash_id = &stash_checkpoint.id.to_string()[..8];
-    println!("{} Stashed changes in checkpoint {}",
-        "✓".green(),
-        short_stash_id.bright_cyan()
-    );
-
-    Ok(Some(entry))
-}
-
-/// Check if working directory has changes compared to checkpoint
-fn check_working_dir_changes(
-    repo_root: &Path,
-    store: &Store,
-    checkpoint: &Checkpoint,
-) -> Result<bool> {
-    use std::collections::HashSet;
-
-    let tree = store.read_tree(checkpoint.root_tree)?;
-
-    // Get all files in checkpoint
-    let checkpoint_files: HashSet<String> = tree.entries_with_paths()
-        .filter_map(|(path_bytes, _)| {
-            std::str::from_utf8(path_bytes).ok().map(|s| s.to_string())
-        })
-        .collect();
-
-    // Walk working directory and check for differences
-    for entry in walkdir::WalkDir::new(repo_root)
-        .into_iter()
-        .filter_entry(|e| {
-            let path = e.path();
-            let name = path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
-            // Skip hidden directories
-            !name.starts_with('.') || path == repo_root
-        })
+    let base = match resilient
+        .send_request_resilient(&crate::ipc::IpcRequest::GetHead)
+        .await?
     {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
+        crate::ipc::IpcResponse::Head(cp) => cp,
+        crate::ipc::IpcResponse::Error(e) => anyhow::bail!("Daemon error: {}", e),
+        _ => anyhow::bail!("Unexpected response to GetHead"),
+    };
+    let base_id = base.as_ref().map(|cp| cp.id);
 
-        if !entry.file_type().is_file() {
-            continue;
-        }
+    // Retry to cover watcher/event latency (e.g. atomic saves).
+    let mut sleep_ms = 50u64;
+    for _ in 0..5 {
+        match resilient
+            .send_request_resilient(&crate::ipc::IpcRequest::FlushCheckpoint)
+            .await?
+        {
+            crate::ipc::IpcResponse::CheckpointFlushed(Some(id_str)) => {
+                let checkpoint_id = ulid::Ulid::from_string(&id_str)?;
 
-        let path = entry.path();
-        let rel_path = match path.strip_prefix(repo_root) {
-            Ok(p) => p.to_string_lossy().to_string(),
-            Err(_) => continue,
-        };
+                println!("{}", "Auto-stashing uncommitted changes...".dimmed());
+                let now_ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)?
+                    .as_millis() as u64;
 
-        // Skip protected paths
-        if rel_path.starts_with(".tl/") || rel_path.starts_with(".git/") || rel_path.starts_with(".jj/") {
-            continue;
-        }
+                let entry = StashEntry {
+                    checkpoint_id,
+                    created_at_ms: now_ms,
+                    message: Some("Auto-stash before pull".to_string()),
+                    base_checkpoint_id: base_id,
+                };
 
-        // Check if file exists in checkpoint
-        if !checkpoint_files.contains(&rel_path) {
-            return Ok(true); // New file
-        }
+                stash_manager.push(entry.clone())?;
 
-        // Check if file content differs
-        if let Some(checkpoint_entry) = tree.get(std::path::Path::new(&rel_path)) {
-            let current_hash = tl_core::hash::hash_file(path)?;
-            if current_hash != checkpoint_entry.blob_hash {
-                return Ok(true); // Modified file
+                let short_stash_id = &checkpoint_id.to_string()[..8];
+                println!(
+                    "{} Stashed changes in checkpoint {}",
+                    "✓".green(),
+                    short_stash_id.bright_cyan()
+                );
+
+                return Ok(Some(entry));
             }
+            crate::ipc::IpcResponse::CheckpointFlushed(None) => {
+                tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
+                sleep_ms = (sleep_ms * 2).min(400);
+            }
+            crate::ipc::IpcResponse::Error(e) => anyhow::bail!("Daemon error: {}", e),
+            _ => anyhow::bail!("Unexpected response to FlushCheckpoint"),
         }
     }
 
-    // Check for deleted files
-    for file in &checkpoint_files {
-        let full_path = repo_root.join(file);
-        if !full_path.exists() {
-            return Ok(true); // Deleted file
-        }
-    }
-
-    Ok(false)
+    Ok(None)
 }
 
-/// Create a checkpoint of current working directory state (for stash)
-///
-/// CRITICAL: This now validates stash completeness by tracking walk errors.
-/// If any files fail to be captured, the stash is considered incomplete.
-fn create_stash_checkpoint(
-    repo_root: &Path,
-    store: &Store,
-    journal: &Journal,
-) -> Result<Checkpoint> {
-    use tl_core::{Entry, Tree};
-
-    let mut tree = Tree::new();
-    let mut files_changed = 0u32;
-    let mut walk_errors = Vec::new();
-
-    // Walk working directory
-    for entry in walkdir::WalkDir::new(repo_root)
-        .into_iter()
-        .filter_entry(|e| {
-            let name = e.file_name().to_string_lossy();
-            !name.starts_with('.')
-        })
-    {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(e) => {
-                // Track walk errors instead of silently skipping
-                walk_errors.push(format!("Walk error: {}", e));
-                continue;
-            }
-        };
-
-        if !entry.file_type().is_file() {
-            continue;
-        }
-
-        let path = entry.path();
-        let rel_path = match path.strip_prefix(repo_root) {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-
-        // Hash and store blob - track errors
-        let blob_hash = match tl_core::hash::hash_file(path) {
-            Ok(h) => h,
-            Err(e) => {
-                walk_errors.push(format!("Hash error {}: {}", path.display(), e));
-                continue;
-            }
-        };
-
-        if !store.blob_store().has_blob(blob_hash) {
-            let content = match std::fs::read(path) {
-                Ok(c) => c,
-                Err(e) => {
-                    walk_errors.push(format!("Read error {}: {}", path.display(), e));
-                    continue;
-                }
-            };
-            if let Err(e) = store.blob_store().write_blob(blob_hash, &content) {
-                walk_errors.push(format!("Write blob error {}: {}", path.display(), e));
-                continue;
-            }
-        }
-
-        // Get file mode
-        #[cfg(unix)]
-        let mode = {
-            use std::os::unix::fs::MetadataExt;
-            match entry.metadata() {
-                Ok(m) => m.mode(),
-                Err(e) => {
-                    walk_errors.push(format!("Metadata error {}: {}", path.display(), e));
-                    continue;
-                }
-            }
-        };
-        #[cfg(not(unix))]
-        let mode = 0o644;
-
-        tree.insert(rel_path, Entry::file(mode, blob_hash));
-        files_changed += 1;
-    }
-
-    // CRITICAL: Fail if stash is incomplete
-    if !walk_errors.is_empty() {
-        anyhow::bail!(
-            "Stash incomplete - {} file(s) could not be captured:\n  {}",
-            walk_errors.len(),
-            walk_errors.iter().take(5).cloned().collect::<Vec<_>>().join("\n  ")
-        );
-    }
-
-    // Store tree
-    let tree_hash = tree.hash();
-    store.write_tree(&tree)?;
-
-    // Create checkpoint
-    let parent = journal.latest()?.map(|cp| cp.id);
-    let checkpoint = Checkpoint::new(
-        parent,
-        tree_hash,
-        CheckpointReason::Manual, // Stash is considered manual
-        vec![],
-        CheckpointMeta {
-            files_changed,
-            bytes_added: 0,
-            bytes_removed: 0,
-        },
-    );
-
-    journal.append(&checkpoint)?;
-
-    Ok(checkpoint)
+struct ImportResult {
+    checkpoint: Checkpoint,
+    already_present: bool,
 }
 
-/// Import a remote JJ commit as a TL checkpoint
-fn import_remote_commit(
-    workspace: &jj_lib::workspace::Workspace,
-    commit_id: &str,
-    store: &Store,
-    journal: &Journal,
-    mapping: &jj::JjMapping,
-    no_pin: bool,
+async fn import_remote_commit_via_daemon(
     tl_dir: &Path,
-) -> Result<Checkpoint> {
-    use journal::PinManager;
+    commit_id: &str,
+    no_pin: bool,
+) -> Result<ImportResult> {
+    let socket_path = tl_dir.join("state/daemon.sock");
+    let resilient = crate::ipc::ResilientIpcClient::new(socket_path);
 
-    // Export JJ commit to temp directory
-    let temp_dir = tempfile::tempdir()
-        .context("Failed to create temporary directory")?;
-
-    jj::git_ops::export_commit_to_dir(workspace, commit_id, temp_dir.path())?;
-
-    // Import directory as checkpoint
-    let (root_tree, files_changed) = import_directory_to_store(temp_dir.path(), store)?;
-
-    // Get parent checkpoint
-    let parent = journal.latest()?.map(|cp| cp.id);
-
-    // Create checkpoint
-    let checkpoint = Checkpoint::new(
-        parent,
-        root_tree,
-        CheckpointReason::Publish, // Imported from remote
-        vec![],
-        CheckpointMeta {
-            files_changed,
-            bytes_added: 0,
-            bytes_removed: 0,
-        },
-    );
-
-    // Write to journal
-    journal.append(&checkpoint)?;
-
-    // Store bidirectional mapping
-    mapping.set(checkpoint.id, commit_id)?;
-    mapping.set_reverse(commit_id, checkpoint.id)?;
-
-    // Auto-pin if requested
-    if !no_pin {
-        let pin_manager = PinManager::new(tl_dir);
-        pin_manager.pin("pulled", checkpoint.id)?;
+    match resilient
+        .send_request_resilient(&crate::ipc::IpcRequest::ImportRemoteCommit {
+            commit_id: commit_id.to_string(),
+            no_pin,
+        })
+        .await?
+    {
+        crate::ipc::IpcResponse::ImportedCommit {
+            checkpoint,
+            already_present,
+        } => Ok(ImportResult {
+            checkpoint,
+            already_present,
+        }),
+        crate::ipc::IpcResponse::Error(e) => anyhow::bail!("Daemon error: {}", e),
+        other => anyhow::bail!("Unexpected response to ImportRemoteCommit: {:?}", other),
     }
-
-    Ok(checkpoint)
 }
 
 /// Re-apply stashed changes after pull
 async fn reapply_stash(
     repo_root: &Path,
+    tl_dir: &Path,
     store: &Store,
-    journal: &Journal,
     stash_manager: &StashManager,
     stash: StashEntry,
 ) -> Result<()> {
     println!();
     println!("{}", "Re-applying stashed changes...".dimmed());
 
-    // Get the stash checkpoint
-    let stash_checkpoint = journal.get(&stash.checkpoint_id)?
-        .ok_or_else(|| anyhow::anyhow!("Stash checkpoint not found"))?;
+    // Get checkpoints via daemon IPC (journal is daemon-owned).
+    let socket_path = tl_dir.join("state/daemon.sock");
+    let resilient = crate::ipc::ResilientIpcClient::new(socket_path);
 
-    // Get current state (after pull)
-    let current = journal.latest()?
-        .ok_or_else(|| anyhow::anyhow!("No current checkpoint"))?;
+    let stash_checkpoint = match resilient
+        .send_request_resilient(&crate::ipc::IpcRequest::GetCheckpoint(stash.checkpoint_id.to_string()))
+        .await?
+    {
+        crate::ipc::IpcResponse::Checkpoint(Some(cp)) => cp,
+        crate::ipc::IpcResponse::Checkpoint(None) => anyhow::bail!("Stash checkpoint not found"),
+        crate::ipc::IpcResponse::Error(e) => anyhow::bail!("Daemon error: {}", e),
+        _ => anyhow::bail!("Unexpected response to GetCheckpoint"),
+    };
+
+    let current = match resilient
+        .send_request_resilient(&crate::ipc::IpcRequest::GetHead)
+        .await?
+    {
+        crate::ipc::IpcResponse::Head(Some(cp)) => cp,
+        crate::ipc::IpcResponse::Head(None) => anyhow::bail!("No current checkpoint"),
+        crate::ipc::IpcResponse::Error(e) => anyhow::bail!("Daemon error: {}", e),
+        _ => anyhow::bail!("Unexpected response to GetHead"),
+    };
 
     // Simple approach: restore stash on top of current
     // TODO: Implement proper 3-way merge for conflicts
@@ -546,88 +347,4 @@ async fn reapply_stash(
     Ok(())
 }
 
-/// Import a directory into the store, returning root tree hash and file count
-fn import_directory_to_store(dir: &Path, store: &Store) -> Result<(tl_core::Sha1Hash, u32)> {
-    use std::fs;
-    use tl_core::{Entry, Tree};
-    use walkdir::WalkDir;
-
-    let mut tree = Tree::new();
-    let mut files_changed = 0u32;
-
-    // Walk directory and import all files
-    for entry in WalkDir::new(dir).follow_links(false) {
-        let entry = entry?;
-        let path = entry.path();
-
-        // Skip the directory itself
-        if path == dir {
-            continue;
-        }
-
-        // Get relative path
-        let rel_path = path.strip_prefix(dir)?;
-
-        // Skip directories (only process files and symlinks)
-        if entry.file_type().is_dir() {
-            continue;
-        }
-
-        // Handle symlinks
-        if entry.file_type().is_symlink() {
-            let target = fs::read_link(path)?;
-            let target_bytes = target.to_string_lossy();
-            let blob_hash = tl_core::hash::hash_bytes(target_bytes.as_bytes());
-
-            if !store.blob_store().has_blob(blob_hash) {
-                store.blob_store().write_blob(blob_hash, target_bytes.as_bytes())?;
-            }
-
-            tree.insert(rel_path, Entry::symlink(blob_hash));
-            files_changed += 1;
-            continue;
-        }
-
-        // Handle regular files
-        if entry.file_type().is_file() {
-            let metadata = entry.metadata()?;
-
-            // Extract Unix mode bits
-            #[cfg(unix)]
-            let mode = {
-                use std::os::unix::fs::MetadataExt;
-                metadata.mode()
-            };
-            #[cfg(not(unix))]
-            let mode = if metadata.permissions().readonly() {
-                0o444
-            } else {
-                0o644
-            };
-
-            // Hash file
-            let blob_hash = if metadata.len() > 4 * 1024 * 1024 {
-                tl_core::hash::hash_file_mmap(path)?
-            } else {
-                tl_core::hash::hash_file(path)?
-            };
-
-            // Write blob if not exists
-            if !store.blob_store().has_blob(blob_hash) {
-                let contents = fs::read(path)?;
-                store.blob_store().write_blob(blob_hash, &contents)?;
-            }
-
-            tree.insert(rel_path, Entry::file(mode, blob_hash));
-            files_changed += 1;
-        }
-    }
-
-    // Compute tree hash
-    let tree_hash = tree.hash();
-
-    // Store tree
-    store.write_tree(&tree)?;
-
-    Ok((tree_hash, files_changed))
-}
+// NOTE: The old tempdir export + WalkDir re-import path was removed for latency reasons.
