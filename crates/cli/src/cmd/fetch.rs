@@ -33,8 +33,8 @@ pub async fn run(no_sync: bool, prune: bool) -> Result<()> {
     jj::git_ops::native_git_fetch(&mut workspace)?;
     println!("{} Fetch complete", "✓".green());
 
-    // 5. Show what was fetched
-    let branches = jj::git_ops::get_remote_branch_updates(&workspace)?;
+    // 5. Show what was fetched (fast path: avoid expensive ahead/behind counts)
+    let branches = jj::git_ops::get_remote_branch_updates_fast(&workspace)?;
 
     if !branches.is_empty() {
         println!();

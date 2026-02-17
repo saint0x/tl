@@ -136,8 +136,14 @@ pub async fn run(
     mapping.flush()
         .context("Failed to flush checkpoint mapping to disk")?;
 
-    // 8. Create bookmark (auto-create main if not specified)
-    let bookmark_name = bookmark.unwrap_or_else(|| "main".to_string());
+    // 8. Create bookmark (Timelapse bookmarks are always under `tl/`).
+    // This avoids colliding with Git's default branch bookmarks (e.g. `main`).
+    let raw_bookmark = bookmark.unwrap_or_else(|| "main".to_string());
+    let bookmark_name = if raw_bookmark.starts_with("tl/") {
+        raw_bookmark
+    } else {
+        format!("tl/{}", raw_bookmark)
+    };
     let last_commit_id = commit_ids.last().unwrap();
 
     // Load workspace and create bookmark natively

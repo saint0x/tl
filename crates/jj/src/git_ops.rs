@@ -93,8 +93,11 @@ pub fn native_git_push(
     let origin_remote: &RemoteName = "origin".as_ref();
 
     if all {
-        // Collect all bookmarks
+        // Collect all Timelapse bookmarks (`tl/*`) only.
         for (bookmark_name, target) in view.local_bookmarks() {
+            if !bookmark_name.as_str().starts_with("tl/") {
+                continue;
+            }
             if let Some(local_commit_id) = target.as_normal() {
                 // Create remote symbol for lookup
                 let remote_symbol = bookmark_name.to_remote_symbol(origin_remote);
@@ -127,21 +130,24 @@ pub fn native_git_push(
             anyhow::bail!("Branch {} not found or not at a single commit", full_name);
         }
     } else {
-        // Auto-detect: find main or first available bookmark (like `git push` auto-detects current branch)
+        // Auto-detect: prefer Timelapse bookmarks, then fall back.
         let mut auto_bookmark: Option<String> = None;
 
-        // Priority 1: main (default branch)
-        let main_ref: &RefName = "main".as_ref();
-        if view.get_local_bookmark(main_ref).is_present() {
-            auto_bookmark = Some("main".to_string());
+        // Priority 1: tl/main
+        let tl_main_ref: &RefName = "tl/main".as_ref();
+        if view.get_local_bookmark(tl_main_ref).is_present() {
+            auto_bookmark = Some("tl/main".to_string());
         } else {
-            // Priority 2: master (alternative default)
-            let master_ref: &RefName = "master".as_ref();
-            if view.get_local_bookmark(master_ref).is_present() {
-                auto_bookmark = Some("master".to_string());
+            // Priority 2: tl/master
+            let tl_master_ref: &RefName = "tl/master".as_ref();
+            if view.get_local_bookmark(tl_master_ref).is_present() {
+                auto_bookmark = Some("tl/master".to_string());
             } else {
-                // Priority 3: First available bookmark
+                // Priority 3: First available tl/* bookmark
                 for (bookmark_name, target) in view.local_bookmarks() {
+                    if !bookmark_name.as_str().starts_with("tl/") {
+                        continue;
+                    }
                     if target.as_normal().is_some() {
                         auto_bookmark = Some(bookmark_name.as_str().to_string());
                         break;
@@ -330,6 +336,15 @@ pub fn native_git_push(
 /// # Arguments
 /// * `workspace` - JJ workspace (must be git-backed)
 pub fn native_git_fetch(workspace: &mut Workspace) -> Result<()> {
+    native_git_fetch_filtered(workspace, StringExpression::all())
+}
+
+/// Fetch from Git remote using jj-lib's native GitFetch API, but only for
+/// bookmarks matched by `bookmark_expr`.
+///
+/// This is useful for latency-sensitive operations (like `tl pull`) where
+/// fetching all branches on a large remote can dominate runtime.
+pub fn native_git_fetch_filtered(workspace: &mut Workspace, bookmark_expr: StringExpression) -> Result<()> {
     // Load repo at HEAD
     let user_settings = create_user_settings()?;
     let repo = workspace.repo_loader().load_at_head()
@@ -345,9 +360,8 @@ pub fn native_git_fetch(workspace: &mut Workspace) -> Result<()> {
     // Create remote name
     let remote_name = RemoteName::new("origin");
 
-    // Expand refspecs for fetching all branches
-    // StringExpression::all() matches everything
-    let refspecs = expand_fetch_refspecs(&remote_name, StringExpression::all())
+    // Expand refspecs for fetching selected branches (refs/heads/* patterns)
+    let refspecs = expand_fetch_refspecs(&remote_name, bookmark_expr)
         .context("Failed to expand fetch refspecs")?;
 
     // Set up callbacks (progress only - auth is handled by git subprocess)
@@ -400,6 +414,127 @@ pub fn native_git_fetch(workspace: &mut Workspace) -> Result<()> {
         .context("Failed to commit fetch transaction")?;
 
     Ok(())
+}
+
+/// Latency-optimized fetch for `tl pull`.
+///
+/// Fetches a small set of branches:
+/// - `main`, `master`
+/// - every local bookmark name (so tracking branches stay up to date)
+///
+/// This avoids fetching every branch from large remotes by default.
+pub fn native_git_fetch_for_pull(workspace: &mut Workspace) -> Result<()> {
+    use std::collections::HashSet;
+
+    let repo = workspace.repo_loader().load_at_head()
+        .context("Failed to load repository")?;
+
+    let view = repo.view();
+
+    let mut names: HashSet<String> = HashSet::new();
+    names.insert("main".to_string());
+    names.insert("master".to_string());
+
+    for (bookmark_name, target) in view.local_bookmarks() {
+        if target.as_normal().is_some() {
+            names.insert(bookmark_name.as_str().to_string());
+        }
+    }
+
+    let mut exprs = Vec::with_capacity(names.len());
+    for name in names {
+        exprs.push(StringExpression::exact(name));
+    }
+
+    native_git_fetch_filtered(workspace, StringExpression::union_all(exprs))
+}
+
+/// Get information about remote branches after fetch without expensive graph
+/// traversal (ahead/behind counts are set to 0).
+///
+/// Intended for fast-path UX (e.g. `tl pull`, `tl fetch`) where we only need
+/// to know which branches changed and whether they're diverged.
+pub fn get_remote_branch_updates_fast(workspace: &jj_lib::workspace::Workspace) -> Result<Vec<RemoteBranchInfo>> {
+    let repo = workspace.repo_loader().load_at_head()
+        .context("Failed to load repository")?;
+
+    let view = repo.view();
+    let mut branches = Vec::new();
+
+    let origin_remote = RemoteName::new("origin");
+    let index = repo.index();
+
+    // Iterate through all remote bookmarks for "origin"
+    for (bookmark_name, remote_ref) in view.remote_bookmarks(&origin_remote) {
+        let remote_commit_id = remote_ref.target.as_normal().map(|id| id.hex());
+
+        // Get local bookmark if exists
+        let local_target = view.get_local_bookmark(bookmark_name);
+        let local_commit_id = local_target.as_normal().map(|id| id.hex());
+
+        // Diverged if neither is ancestor of the other (cheap via index).
+        let is_diverged = if let (Some(local_target), Some(remote_target)) =
+            (local_target.as_normal(), remote_ref.target.as_normal())
+        {
+            if local_target.hex() == remote_target.hex() {
+                false
+            } else {
+                let local_ancestor = index.is_ancestor(local_target, remote_target)
+                    .context("Failed to check ancestry (local->remote)")?;
+                let remote_ancestor = index.is_ancestor(remote_target, local_target)
+                    .context("Failed to check ancestry (remote->local)")?;
+                !local_ancestor && !remote_ancestor
+            }
+        } else {
+            false
+        };
+
+        branches.push(RemoteBranchInfo {
+            name: bookmark_name.as_str().to_string(),
+            remote_commit_id,
+            local_commit_id,
+            is_diverged,
+            commits_ahead: 0,
+            commits_behind: 0,
+        });
+    }
+
+    // Sort by branch name
+    branches.sort_by(|a, b| a.name.cmp(&b.name));
+
+    Ok(branches)
+}
+
+/// Return the first matching remote branch head (name + commit hex) for origin.
+///
+/// This avoids building a full branch list and avoids expensive ahead/behind
+/// computations. Used by `tl pull` to pick a sync target quickly.
+pub fn get_preferred_remote_head(
+    workspace: &jj_lib::workspace::Workspace,
+    preferred: &[&str],
+) -> Result<Option<(String, String)>> {
+    let repo = workspace.repo_loader().load_at_head()
+        .context("Failed to load repository")?;
+
+    let view = repo.view();
+    let origin_remote = RemoteName::new("origin");
+
+    for name in preferred {
+        let ref_name: &RefName = (*name).as_ref();
+        let remote_symbol = ref_name.to_remote_symbol(&origin_remote);
+        let remote_ref = view.get_remote_bookmark(remote_symbol);
+        if let Some(id) = remote_ref.target.as_normal() {
+            return Ok(Some((name.to_string(), id.hex())));
+        }
+    }
+
+    for (bookmark_name, remote_ref) in view.remote_bookmarks(&origin_remote) {
+        if let Some(id) = remote_ref.target.as_normal() {
+            return Ok(Some((bookmark_name.as_str().to_string(), id.hex())));
+        }
+    }
+
+    Ok(None)
 }
 
 /// Calculate how many commits ahead and behind two branches are
@@ -712,6 +847,31 @@ pub fn export_commit_to_dir(
     )?;
 
     Ok(())
+}
+
+/// Export a specific JJ commit (by hex ID) directly into the Timelapse store.
+///
+/// Returns `(root_tree_hash, entries_written)`.
+pub fn export_commit_to_tl_store(
+    workspace: &jj_lib::workspace::Workspace,
+    commit_id_hex: &str,
+    tl_store: &tl_core::Store,
+) -> Result<(tl_core::Sha1Hash, u32)> {
+    use jj_lib::backend::CommitId;
+
+    let repo = workspace
+        .repo_loader()
+        .load_at_head()
+        .context("Failed to load repository")?;
+
+    let commit_id = CommitId::new(hex::decode(commit_id_hex).context("Invalid commit hex")?);
+    let commit = repo
+        .store()
+        .get_commit(&commit_id)
+        .context("Failed to get commit")?;
+
+    let tree = commit.tree();
+    crate::export::export_jj_tree_to_tl_store(repo.store(), &tree, tl_store)
 }
 
 #[cfg(test)]

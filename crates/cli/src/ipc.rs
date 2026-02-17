@@ -50,6 +50,14 @@ pub enum IpcRequest {
     /// Invalidate pathmap (after restore operation modifies working directory)
     /// Daemon will rebuild pathmap from HEAD checkpoint on next checkpoint cycle
     InvalidatePathmap,
+    /// Import a JJ commit (hex id) into the TL store + journal as a checkpoint.
+    ///
+    /// This must run in the daemon process because the journal is sled-backed
+    /// and is not safe to open concurrently from multiple processes.
+    ImportRemoteCommit {
+        commit_id: String,
+        no_pin: bool,
+    },
 }
 
 /// IPC response from daemon to CLI
@@ -89,6 +97,11 @@ pub enum IpcResponse {
         total_checkpoints: usize,
         checkpoint_ids: Vec<String>,
         store_size_bytes: u64,
+    },
+    /// Result of importing a JJ commit as a TL checkpoint.
+    ImportedCommit {
+        checkpoint: Checkpoint,
+        already_present: bool,
     },
     /// Error occurred
     Error(String),
@@ -130,57 +143,72 @@ impl IpcClient {
 
     /// Send request and receive response
     pub async fn send_request(&mut self, request: &IpcRequest) -> Result<IpcResponse> {
-        // Serialize request
-        let payload = bincode::serialize(request)
-            .context("Failed to serialize request")?;
+        self.send_request_with_timeout(request, Duration::from_secs(5)).await
+    }
 
-        if payload.len() > MAX_MESSAGE_SIZE {
-            anyhow::bail!("Request too large: {} bytes", payload.len());
+    /// Send request with a custom timeout.
+    ///
+    /// Used for quick liveness checks (short timeout) and for hard-bounding
+    /// end-to-end CLI latency (longer timeout).
+    pub async fn send_request_with_timeout(
+        &mut self,
+        request: &IpcRequest,
+        timeout: Duration,
+    ) -> Result<IpcResponse> {
+        let fut = async {
+            // Serialize request
+            let payload = bincode::serialize(request).context("Failed to serialize request")?;
+
+            if payload.len() > MAX_MESSAGE_SIZE {
+                anyhow::bail!("Request too large: {} bytes", payload.len());
+            }
+
+            // Write length prefix (4 bytes, little-endian)
+            let len = (payload.len() as u32).to_le_bytes();
+            self.stream
+                .write_all(&len)
+                .await
+                .context("Failed to write request length")?;
+
+            // Write payload
+            self.stream
+                .write_all(&payload)
+                .await
+                .context("Failed to write request payload")?;
+
+            self.stream.flush().await.context("Failed to flush request")?;
+
+            // Read response length
+            let mut len_buf = [0u8; 4];
+            self.stream
+                .read_exact(&mut len_buf)
+                .await
+                .context("Failed to read response length")?;
+
+            let response_len = u32::from_le_bytes(len_buf) as usize;
+
+            if response_len > MAX_MESSAGE_SIZE {
+                anyhow::bail!("Response too large: {} bytes", response_len);
+            }
+
+            // Read response payload
+            let mut response_payload = vec![0u8; response_len];
+            self.stream
+                .read_exact(&mut response_payload)
+                .await
+                .context("Failed to read response payload")?;
+
+            // Deserialize response
+            let response: IpcResponse =
+                bincode::deserialize(&response_payload).context("Failed to deserialize response")?;
+
+            Ok(response)
+        };
+
+        match tokio::time::timeout(timeout, fut).await {
+            Ok(res) => res,
+            Err(_) => anyhow::bail!("IPC request timed out"),
         }
-
-        // Write length prefix (4 bytes, little-endian)
-        let len = (payload.len() as u32).to_le_bytes();
-        self.stream
-            .write_all(&len)
-            .await
-            .context("Failed to write request length")?;
-
-        // Write payload
-        self.stream
-            .write_all(&payload)
-            .await
-            .context("Failed to write request payload")?;
-
-        self.stream
-            .flush()
-            .await
-            .context("Failed to flush request")?;
-
-        // Read response length
-        let mut len_buf = [0u8; 4];
-        self.stream
-            .read_exact(&mut len_buf)
-            .await
-            .context("Failed to read response length")?;
-
-        let response_len = u32::from_le_bytes(len_buf) as usize;
-
-        if response_len > MAX_MESSAGE_SIZE {
-            anyhow::bail!("Response too large: {} bytes", response_len);
-        }
-
-        // Read response payload
-        let mut response_payload = vec![0u8; response_len];
-        self.stream
-            .read_exact(&mut response_payload)
-            .await
-            .context("Failed to read response payload")?;
-
-        // Deserialize response
-        let response: IpcResponse = bincode::deserialize(&response_payload)
-            .context("Failed to deserialize response")?;
-
-        Ok(response)
     }
 
     /// Get daemon status
@@ -370,8 +398,48 @@ impl ResilientIpcClient {
 
     /// Send request with automatic reconnect on failure
     pub async fn send_request_resilient(&self, request: &IpcRequest) -> Result<IpcResponse> {
-        let mut client = self.connect_with_retry().await?;
-        client.send_request(request).await
+        fn is_transient(err: &anyhow::Error) -> bool {
+            if err.chain().any(|c| c.downcast_ref::<tokio::time::error::Elapsed>().is_some()) {
+                return true;
+            }
+            // Retry common transient IO failures (daemon restarting, socket churn, etc.)
+            for cause in err.chain() {
+                if let Some(ioe) = cause.downcast_ref::<std::io::Error>() {
+                    use std::io::ErrorKind::*;
+                    return matches!(
+                        ioe.kind(),
+                        BrokenPipe | ConnectionReset | ConnectionAborted | NotConnected | UnexpectedEof | TimedOut
+                    );
+                }
+            }
+            false
+        }
+
+        let mut backoff = Duration::from_millis(50);
+        for attempt in 0..10 {
+            let mut client = match self.connect_with_retry().await {
+                Ok(c) => c,
+                Err(e) => {
+                    if attempt == 9 {
+                        return Err(e);
+                    }
+                    tokio::time::sleep(backoff).await;
+                    backoff = backoff.mul_f32(1.5).min(Duration::from_secs(1));
+                    continue;
+                }
+            };
+
+            match client.send_request(request).await {
+                Ok(resp) => return Ok(resp),
+                Err(e) if is_transient(&e) && attempt < 9 => {
+                    tokio::time::sleep(backoff).await;
+                    backoff = backoff.mul_f32(1.5).min(Duration::from_secs(1));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        unreachable!("send_request_resilient retry loop should have returned")
     }
 }
 
@@ -430,10 +498,15 @@ where
 {
     // Read length prefix (4 bytes)
     let mut len_buf = [0u8; 4];
-    stream
-        .read_exact(&mut len_buf)
-        .await
-        .context("Failed to read request length")?;
+    match stream.read_exact(&mut len_buf).await {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+            // Client connected and closed without sending a request. This can
+            // happen with probe connections; treat as a no-op.
+            return Ok(());
+        }
+        Err(e) => return Err(e).context("Failed to read request length"),
+    }
 
     let len = u32::from_le_bytes(len_buf) as usize;
 
