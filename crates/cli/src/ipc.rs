@@ -22,6 +22,10 @@ pub enum IpcRequest {
     GetCheckpoint(String),
     /// Flush pending changes and create checkpoint immediately
     FlushCheckpoint,
+    /// Flush pending changes quickly (no waiting / reconciliation).
+    ///
+    /// Used for latency-sensitive operations (e.g. `tl pull` auto-stash checks).
+    FlushCheckpointFast,
     /// Force create a checkpoint even with no pending changes (proactive checkpoint)
     /// This creates a "snapshot" of the current state that can be restored to later
     ForceCheckpoint,
@@ -254,6 +258,15 @@ impl IpcClient {
             IpcResponse::CheckpointFlushed(checkpoint_id) => Ok(checkpoint_id),
             IpcResponse::Error(err) => anyhow::bail!("Daemon error: {}", err),
             _ => anyhow::bail!("Unexpected response to FlushCheckpoint"),
+        }
+    }
+
+    /// Flush pending changes quickly (no waiting), returning the checkpoint ID if created.
+    pub async fn flush_checkpoint_fast(&mut self) -> Result<Option<String>> {
+        match self.send_request(&IpcRequest::FlushCheckpointFast).await? {
+            IpcResponse::CheckpointFlushed(checkpoint_id) => Ok(checkpoint_id),
+            IpcResponse::Error(err) => anyhow::bail!("Daemon error: {}", err),
+            _ => anyhow::bail!("Unexpected response to FlushCheckpointFast"),
         }
     }
 

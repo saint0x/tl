@@ -16,12 +16,15 @@ pub async fn run(no_sync: bool, prune: bool) -> Result<()> {
     let repo_root = util::find_repo_root()?;
     let tl_dir = repo_root.join(".tl");
 
-    // Ensure daemon is running
-    crate::daemon::ensure_daemon_running().await?;
-
     // 2. Verify JJ workspace exists
     if jj::detect_jj_workspace(&repo_root)?.is_none() {
         anyhow::bail!("No JJ workspace found. Run 'tl init' first.");
+    }
+
+    // Only require the daemon if we're going to touch the working directory
+    // (auto-stash, sync, pathmap invalidation).
+    if !no_sync {
+        crate::daemon::ensure_daemon_running().await?;
     }
 
     // 3. Load workspace

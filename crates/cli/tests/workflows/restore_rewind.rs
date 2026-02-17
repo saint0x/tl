@@ -10,11 +10,10 @@ use crate::common::cli::{TlCommand, extract_ulid};
 
 /// Trigger checkpoint creation and return the checkpoint ID
 ///
-/// Retries up to 5 times with increasing delays to handle FSEvents latency.
+/// Retries with backoff to handle FSEvents latency and coalescing.
 async fn create_checkpoint(root: &std::path::Path) -> Result<String> {
-    // FSEvents on macOS can have 100-500ms latency, retry with backoff
-    for attempt in 0..5 {
-        let delay = Duration::from_millis(500 + (attempt as u64 * 300));
+    for attempt in 0..10 {
+        let delay = Duration::from_millis(400 + (attempt as u64 * 250));
         tokio::time::sleep(delay).await;
 
         let flush_result = TlCommand::new(root)
@@ -28,7 +27,7 @@ async fn create_checkpoint(root: &std::path::Path) -> Result<String> {
         }
     }
 
-    anyhow::bail!("No checkpoint created after 5 attempts (FSEvents latency issue)")
+    anyhow::bail!("No checkpoint created after retries (FSEvents latency issue)")
 }
 
 /// Create checkpoint with guaranteed success (retries with file re-touch)
@@ -38,12 +37,12 @@ async fn create_checkpoint_guaranteed(
     file: &str,
     content: &str,
 ) -> Result<String> {
-    // Try up to 5 times with file re-touching
-    for attempt in 0..5 {
+    // Try up to 12 times with file re-touching (FSEvents can lag under load).
+    for attempt in 0..12 {
         // Re-touch the file to ensure FSEvents sees it
         project.modify_files(&[file], content)?;
 
-        let delay = Duration::from_millis(500 + (attempt as u64 * 200));
+        let delay = Duration::from_millis(400 + (attempt as u64 * 200));
         tokio::time::sleep(delay).await;
 
         let flush_result = TlCommand::new(root)
@@ -57,7 +56,7 @@ async fn create_checkpoint_guaranteed(
         }
     }
 
-    anyhow::bail!("Failed to create checkpoint after 5 attempts for content: {}", content)
+    anyhow::bail!("Failed to create checkpoint after multiple attempts for content: {}", content)
 }
 
 /// Test basic restore functionality

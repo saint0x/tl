@@ -25,7 +25,16 @@ use ulid::Ulid;
 use watcher::Watcher;
 
 /// Flush checkpoint request with response channel
-type FlushRequest = oneshot::Sender<Result<Option<String>>>;
+#[derive(Clone, Copy, Debug)]
+enum FlushMode {
+    Fast,
+    Reliable,
+}
+
+struct FlushRequest {
+    mode: FlushMode,
+    tx: oneshot::Sender<Result<Option<String>>>,
+}
 
 /// Supervisor for daemon process - handles crashes and restarts
 pub struct DaemonSupervisor {
@@ -179,11 +188,24 @@ impl Daemon {
                                                     // Request flush from main event loop
                                                     let (response_tx, response_rx) = oneshot::channel();
 
-                                                    if let Err(_) = flush_tx.send(response_tx).await {
+                                                    if let Err(_) = flush_tx.send(FlushRequest { mode: FlushMode::Reliable, tx: response_tx }).await {
                                                         return Ok(IpcResponse::Error("Daemon shutting down".to_string()));
                                                     }
 
                                                     // Wait for flush to complete
+                                                    match response_rx.await {
+                                                        Ok(Ok(checkpoint_id)) => Ok(IpcResponse::CheckpointFlushed(checkpoint_id)),
+                                                        Ok(Err(e)) => Ok(IpcResponse::Error(e.to_string())),
+                                                        Err(_) => Ok(IpcResponse::Error("Flush request cancelled".to_string())),
+                                                    }
+                                                }
+                                                IpcRequest::FlushCheckpointFast => {
+                                                    let (response_tx, response_rx) = oneshot::channel();
+
+                                                    if let Err(_) = flush_tx.send(FlushRequest { mode: FlushMode::Fast, tx: response_tx }).await {
+                                                        return Ok(IpcResponse::Error("Daemon shutting down".to_string()));
+                                                    }
+
                                                     match response_rx.await {
                                                         Ok(Ok(checkpoint_id)) => Ok(IpcResponse::CheckpointFlushed(checkpoint_id)),
                                                         Ok(Err(e)) => Ok(IpcResponse::Error(e.to_string())),
@@ -657,14 +679,14 @@ impl Daemon {
                 }
 
                 // Handle flush checkpoint requests from IPC
-                Some(response_tx) = self.flush_rx.recv() => {
+                Some(req) = self.flush_rx.recv() => {
                     tracing::info!("Received flush checkpoint request");
 
                     // Check for restore lock before flushing
                     if RestoreLock::is_held(&self.store.tl_dir()) {
                         tracing::warn!("Flush skipped - restore operation in progress");
                         self.status.write().await.checkpoints_skipped += 1;
-                        let _ = response_tx.send(Ok(None));
+                        let _ = req.tx.send(Ok(None));
                         continue;
                     }
 
@@ -672,8 +694,45 @@ impl Daemon {
                     if GcLock::is_held(&self.store.tl_dir()) {
                         tracing::warn!("Flush skipped - garbage collection in progress");
                         self.status.write().await.checkpoints_skipped += 1;
-                        let _ = response_tx.send(Ok(None));
+                        let _ = req.tx.send(Ok(None));
                         continue;
+                    }
+
+                    // If we have no pending paths yet, opportunistically pump the watcher
+                    // pipeline and then flush any coalesced/debounced paths. This makes
+                    // `tl flush` reliable for "create file then flush immediately" flows
+                    // without waiting out debounce windows.
+                    if pending_paths.is_empty() {
+                        let _ = self.watcher.poll_events().await;
+                        pending_paths.extend(self.watcher.next_batch());
+
+                        if pending_paths.is_empty() {
+                            pending_paths.extend(self.watcher.flush());
+                        }
+
+                        self.status.write().await.watcher_paths = pending_paths.len();
+                    }
+
+                    // Reliable flush: give the watcher a chance to deliver events, and flush
+                    // the debounce/coalesce pipeline so we don't miss just-created files.
+                    if pending_paths.is_empty() && matches!(req.mode, FlushMode::Reliable) {
+                        let deadline = Instant::now() + Duration::from_secs(2);
+                        while pending_paths.is_empty() && Instant::now() < deadline {
+                            let _ = self.watcher.poll_events().await;
+                            pending_paths.extend(self.watcher.flush());
+                            if !pending_paths.is_empty() {
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                        }
+                        self.status.write().await.watcher_paths = pending_paths.len();
+                    }
+
+                    // Fast flush: single pump + flush, no waiting.
+                    if pending_paths.is_empty() && matches!(req.mode, FlushMode::Fast) {
+                        let _ = self.watcher.poll_events().await;
+                        pending_paths.extend(self.watcher.flush());
+                        self.status.write().await.watcher_paths = pending_paths.len();
                     }
 
                     let result = if !pending_paths.is_empty() {
@@ -707,7 +766,7 @@ impl Daemon {
                     };
 
                     // Send result back to IPC handler (ignore if receiver dropped)
-                    let _ = response_tx.send(result);
+                    let _ = req.tx.send(result);
                 }
 
                 // Auto-GC check (runs periodically)
@@ -952,8 +1011,24 @@ pub async fn ensure_daemon_running_with_timeout(timeout_secs: u64) -> Result<()>
         return Ok(());
     }
 
-    // Start daemon in background
-    start_background_internal(&repo_root).await?;
+    // Avoid double-spawning daemons:
+    // - During startup, the daemon grabs the lock before the socket is ready.
+    // - If we spawn again in that window, the second daemon can fail opening the sled journal.
+    let lock_path = tl_dir.join("locks/daemon.lock");
+    if lock_path.exists() {
+        // If the lock isn't held by any process, it's a stale file left after a crash.
+        // Clean it up so a fresh start can proceed.
+        if is_unlocked_file(&lock_path).unwrap_or(false) {
+            let _ = std::fs::remove_file(&lock_path);
+            let _ = std::fs::remove_file(tl_dir.join("state/daemon.sock"));
+        }
+    }
+
+    // If there's no existing (held) lock, start daemon in background.
+    // If the lock is held, just wait for readiness below.
+    if !lock_path.exists() || is_unlocked_file(&lock_path).unwrap_or(false) {
+        start_background_internal(&repo_root).await?;
+    }
 
     // Wait with timeout for startup confirmation
     let timeout = Duration::from_secs(timeout_secs);
@@ -973,6 +1048,40 @@ pub async fn ensure_daemon_running_with_timeout(timeout_secs: u64) -> Result<()>
         timeout_secs,
         log_file.display()
     )
+}
+
+/// Returns true if the file exists and is not currently locked with an exclusive flock().
+///
+/// On Unix, this is a safe way to detect stale lock *files* without deleting locks that
+/// are actively held by another live process.
+fn is_unlocked_file(path: &Path) -> Result<bool> {
+    #[cfg(unix)]
+    {
+        use std::fs::OpenOptions;
+        use nix::fcntl::{flock, FlockArg};
+        use std::os::unix::io::AsRawFd;
+
+        let file = match OpenOptions::new().read(true).write(true).open(path) {
+            Ok(f) => f,
+            Err(_) => return Ok(false), // can't open => be conservative
+        };
+        // Try a non-blocking exclusive lock. If we can take it, the file is not
+        // currently locked by another process. Release immediately.
+        match flock(file.as_raw_fd(), FlockArg::LockExclusiveNonblock) {
+            Ok(()) => {
+                let _ = flock(file.as_raw_fd(), FlockArg::Unlock);
+                Ok(true)
+            }
+            Err(nix::errno::Errno::EWOULDBLOCK) => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(false)
+    }
 }
 
 /// Start the Timelapse daemon (public entry point)

@@ -45,16 +45,11 @@ impl DaemonLock {
 
         // Try to acquire exclusive lock (non-blocking)
         if !try_flock_exclusive(&file)? {
-            // Lock held - check if stale
-            if Self::is_stale_lock(&mut file)? {
-                // Force remove stale lock and retry
-                tracing::warn!("Removing stale daemon lock");
-                drop(file);
-                std::fs::remove_file(&lock_path)?;
-                return Self::acquire(tl_dir); // Retry
-            } else {
-                anyhow::bail!("Daemon already running (lock file held by active process)");
-            }
+            // IMPORTANT:
+            // If flock() says the lock is held, another live process currently owns the lock.
+            // Do not delete/recreate the lock file here (race: deleting a locked file does not
+            // release the lock on the old inode, allowing two daemons to run concurrently).
+            anyhow::bail!("Daemon already running (lock file held by active process)");
         }
 
         // Write PID to lock file
@@ -73,21 +68,6 @@ impl DaemonLock {
         std::fs::remove_file(&self.path)
             .context("Failed to remove lock file")?;
         Ok(())
-    }
-
-    /// Check if lock file represents a stale lock
-    fn is_stale_lock(file: &mut File) -> Result<bool> {
-        // Read lock content
-        match Self::read_lock_content(file) {
-            Ok(content) => {
-                // Check if process is alive
-                Ok(!is_process_alive(content.pid))
-            }
-            Err(_) => {
-                // If we can't read lock content, assume it's stale
-                Ok(true)
-            }
-        }
     }
 
     /// Write lock content (PID + timestamp)
@@ -127,7 +107,7 @@ impl Drop for DaemonLock {
 
 /// Try to acquire exclusive file lock (non-blocking)
 #[cfg(unix)]
-fn try_flock_exclusive(file: &File) -> Result<bool> {
+pub(crate) fn try_flock_exclusive(file: &File) -> Result<bool> {
     use nix::fcntl::{flock, FlockArg};
     use std::os::unix::io::AsRawFd;
 
