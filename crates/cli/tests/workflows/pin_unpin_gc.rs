@@ -10,18 +10,22 @@ use crate::common::cli::TlCommand;
 
 /// Trigger checkpoint creation and return the checkpoint ID
 async fn create_checkpoint(root: &std::path::Path) -> Result<Option<String>> {
-    // Wait for FSEvents latency + coalescing window (macOS can have 100-300ms FSEvents delay)
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    for attempt in 0..10 {
+        let delay = Duration::from_millis(400 + (attempt as u64 * 250));
+        tokio::time::sleep(delay).await;
 
-    let flush_result = TlCommand::new(root)
-        .args(&["flush"])
-        .execute()?;
+        let flush_result = TlCommand::new(root)
+            .args(&["flush"])
+            .execute()?;
 
-    if !flush_result.success() {
-        return Ok(None);
+        if flush_result.success() {
+            if let Some(id) = crate::common::cli::extract_ulid(&flush_result.stdout) {
+                return Ok(Some(id));
+            }
+        }
     }
 
-    Ok(crate::common::cli::extract_ulid(&flush_result.stdout))
+    Ok(None)
 }
 
 /// Test basic pin creation

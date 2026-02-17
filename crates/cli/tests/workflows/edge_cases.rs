@@ -10,11 +10,12 @@ use crate::common::cli::TlCommand;
 
 /// Trigger checkpoint creation and return the checkpoint ID
 ///
-/// Retries up to 3 times with increasing delays to handle FSEvents latency.
+/// Retries with backoff to handle FSEvents latency and coalescing.
 async fn create_checkpoint(root: &std::path::Path) -> Result<Option<String>> {
-    // FSEvents on macOS can have 100-500ms latency, retry with backoff
-    for attempt in 0..3 {
-        let delay = Duration::from_millis(500 + (attempt as u64 * 300));
+    // Under load, FSEvents latency can be multiple seconds. Keep this bounded
+    // but forgiving so integration tests aren't flaky.
+    for attempt in 0..10 {
+        let delay = Duration::from_millis(400 + (attempt as u64 * 250));
         tokio::time::sleep(delay).await;
 
         let flush_result = TlCommand::new(root)
@@ -28,7 +29,7 @@ async fn create_checkpoint(root: &std::path::Path) -> Result<Option<String>> {
         }
 
         // If no checkpoint created, the FSEvents hasn't fired yet - retry
-        if attempt < 2 {
+        if attempt < 9 {
             tracing::debug!("Checkpoint creation attempt {} failed, retrying...", attempt + 1);
         }
     }

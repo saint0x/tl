@@ -103,8 +103,10 @@ impl MacOSWatcher {
             NotifyEventKind::Modify(_) => EventKind::Modify(ModifyKind::Any),
             NotifyEventKind::Remove(_) => EventKind::Delete,
             NotifyEventKind::Other => {
-                // Potential overflow or unknown event
-                return None;
+                // FSEvents sometimes reports file creations/truncations as "Other"
+                // (notably for empty files). Treat as a generic modification so we
+                // don't miss real changes.
+                EventKind::Modify(ModifyKind::Any)
             }
             _ => EventKind::Modify(ModifyKind::Any),
         };

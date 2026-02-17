@@ -25,27 +25,15 @@ pub async fn run(
     let repo_root = util::find_repo_root()?;
     let tl_dir = repo_root.join(".tl");
 
-    // Ensure daemon is running
-    crate::daemon::ensure_daemon_running().await?;
-
     // 2. Verify JJ workspace exists
     if jj::detect_jj_workspace(&repo_root)?.is_none() {
         anyhow::bail!("No JJ workspace found. Run 'jj git init' first.");
     }
 
-    // 3. Open components
-    let store = Store::open(&repo_root)
-        .context("Failed to open Timelapse store")?;
-    let stash_manager = StashManager::new(&tl_dir);
-
-    // 4. Check for uncommitted changes and auto-stash
-    let stash_entry = if !fetch_only {
-        check_and_auto_stash(&tl_dir, &stash_manager).await?
-    } else {
-        None
-    };
-
-    // 5. Fetch from remote using latency-optimized refspec selection
+    // 3. Fetch from remote using latency-optimized refspec selection
+    //
+    // Fetch-only mode should not require the daemon at all; it should be as close
+    // to `jj git fetch`/`git fetch` as possible.
     println!("{}", "Fetching from Git remote...".dimmed());
     let mut workspace = jj::load_workspace(&repo_root)
         .context("Failed to load JJ workspace")?;
@@ -59,6 +47,17 @@ pub async fn run(
         println!("{}", "Fetch complete. Use 'tl pull' (without --fetch-only) to sync working directory.".dimmed());
         return Ok(());
     }
+
+    // From here on we need the daemon (checkpoint import, flush-based auto-stash, etc.).
+    crate::daemon::ensure_daemon_running().await?;
+
+    // 4. Open components
+    let store = Store::open(&repo_root)
+        .context("Failed to open Timelapse store")?;
+    let stash_manager = StashManager::new(&tl_dir);
+
+    // 5. Check for uncommitted changes and auto-stash
+    let stash_entry = check_and_auto_stash(&tl_dir, &stash_manager).await?;
 
     // 6. Choose sync target quickly (prefer main/master, else first remote bookmark)
     let (_sync_branch_name, remote_commit_id) =
@@ -166,7 +165,7 @@ async fn check_and_auto_stash(
     let mut sleep_ms = 50u64;
     for _ in 0..5 {
         match resilient
-            .send_request_resilient(&crate::ipc::IpcRequest::FlushCheckpoint)
+            .send_request_resilient(&crate::ipc::IpcRequest::FlushCheckpointFast)
             .await?
         {
             crate::ipc::IpcResponse::CheckpointFlushed(Some(id_str)) => {
