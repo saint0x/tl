@@ -418,35 +418,28 @@ pub fn native_git_fetch_filtered(workspace: &mut Workspace, bookmark_expr: Strin
 
 /// Latency-optimized fetch for `tl pull`.
 ///
-/// Fetches a small set of branches:
-/// - `main`, `master`
-/// - every local bookmark name (so tracking branches stay up to date)
+/// Fetches a minimal set of branches first, then falls back to a full fetch
+/// only if we still can't identify a remote head.
 ///
-/// This avoids fetching every branch from large remotes by default.
+/// This is critical for performance on large remotes: enumerating local
+/// bookmarks into a giant union of refspecs can dominate runtime.
 pub fn native_git_fetch_for_pull(workspace: &mut Workspace) -> Result<()> {
-    use std::collections::HashSet;
-
-    let repo = workspace.repo_loader().load_at_head()
-        .context("Failed to load repository")?;
-
-    let view = repo.view();
-
-    let mut names: HashSet<String> = HashSet::new();
-    names.insert("main".to_string());
-    names.insert("master".to_string());
-
-    for (bookmark_name, target) in view.local_bookmarks() {
-        if target.as_normal().is_some() {
-            names.insert(bookmark_name.as_str().to_string());
-        }
+    // Fast path: fetch only common default branches.
+    let preferred = ["main", "master", "trunk", "develop"];
+    let mut exprs = Vec::with_capacity(preferred.len());
+    for name in preferred {
+        exprs.push(StringExpression::exact(name.to_string()));
     }
 
-    let mut exprs = Vec::with_capacity(names.len());
-    for name in names {
-        exprs.push(StringExpression::exact(name));
+    native_git_fetch_filtered(workspace, StringExpression::union_all(exprs))?;
+
+    // If we still can't find a remote head, fall back to fetching everything.
+    // This preserves correctness for repos whose default branch is not common.
+    if get_preferred_remote_head(workspace, &preferred)?.is_none() {
+        native_git_fetch_filtered(workspace, StringExpression::all())?;
     }
 
-    native_git_fetch_filtered(workspace, StringExpression::union_all(exprs))
+    Ok(())
 }
 
 /// Get information about remote branches after fetch without expensive graph
