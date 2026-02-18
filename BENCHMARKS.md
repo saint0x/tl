@@ -2,10 +2,10 @@
 
 This document records validated performance benchmarks for Timelapse operations.
 
-**Last Updated:** 2026-01-04
+**Last Updated:** 2026-02-18
 **Test Environment:** macOS ARM64 (Apple Silicon)
 **Rust Version:** 1.83+
-**Test Method:** Event-driven integration tests with `tl flush` command
+**Test Method:** Event-driven integration tests with `tl flush` command; CLI wall-clock timing for network ops (`git fetch` parity)
 
 ---
 
@@ -81,6 +81,39 @@ Command displays daemon status and repository information.
 - Query happens via IPC to running daemon
 - No database locks required
 - Near-instantaneous response time
+
+---
+
+## Git Network Fetch (Parity)
+
+These benchmarks cover network-facing fetch operations. The goal is to avoid
+artificial Timelapse overhead (daemon IPC + JJ import/transactions) when the
+user asks for a strict "fetch only".
+
+### `tl pull --fetch-only`
+
+**Behavior (production):**
+- Runs `git fetch --quiet origin` directly
+- Does not start the daemon
+- Does not invoke `jj`
+
+**Benchmark (2026-02-17, macOS ARM64, repo: `saint0x/tl`):**
+
+| Operation | N | p50 | p90 | p99 | Notes |
+|----------|---|-----|-----|-----|------|
+| `git fetch --quiet origin` | 30 | ~0.521s | ~0.586s | ~1.020s | Baseline |
+| `tl pull --fetch-only` | 30 | ~0.535s | ~0.825s | ~1.038s | Git-parity path |
+
+**Notes:**
+- Results include wall-clock time for the Git subprocess.
+- Network variance dominates p99.
+
+### `tl fetch --no-sync`
+
+**Behavior (production):**
+- Runs `git fetch --quiet origin` directly (adds `--prune` when requested)
+- Does not start the daemon
+- Does not invoke `jj`
 
 ---
 
