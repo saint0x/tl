@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "watcher-lib-memory",
+  "steps": [
+    { "type": "memory_alloc", "bytes": 320, "key": "watcher_lib_buf", "tag": "watcher_lib" },
+    { "type": "memory_assert_in_use_bytes", "equals": 320 },
+    { "type": "memory_free", "key": "watcher_lib_buf" },
+    { "type": "memory_assert_in_use_bytes", "equals": 0 }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "store-run",
+  "steps": [
+    { "type": "trace_event", "name": "store-run" },
+    { "type": "fs_write", "path": "tmp/store/run.txt", "data": "store-run" },
+    { "type": "fs_read_assert", "path": "tmp/store/run.txt", "equals": "store-run" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

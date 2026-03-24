@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "checkpoint-lifecycle-host",
+  "steps": [
+    { "type": "trace_event", "name": "checkpoint_lifecycle-host" },
+    { "type": "fs_write", "path": "tmp/checkpoint_lifecycle/host.txt", "data": "checkpoint_lifecycle-host" },
+    { "type": "fs_read_assert", "path": "tmp/checkpoint_lifecycle/host.txt", "equals": "checkpoint_lifecycle-host" },
+    { "type": "assert_eq_int", "a": 2, "b": 2 }
+  ]
+}

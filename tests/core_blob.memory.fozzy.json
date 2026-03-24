@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "core-blob-memory",
+  "steps": [
+    { "type": "memory_alloc", "bytes": 288, "key": "core_blob_buf", "tag": "core_blob" },
+    { "type": "memory_assert_in_use_bytes", "equals": 288 },
+    { "type": "memory_free", "key": "core_blob_buf" },
+    { "type": "memory_assert_in_use_bytes", "equals": 0 }
+  ]
+}

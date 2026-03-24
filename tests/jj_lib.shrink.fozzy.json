@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "jj-lib-shrink",
+  "steps": [
+    { "type": "trace_event", "name": "jj_lib-shrink" },
+    { "type": "assert_eq_int", "a": 28, "b": 28 }
+  ]
+}

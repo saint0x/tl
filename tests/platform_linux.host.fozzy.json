@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "platform-linux-host",
+  "steps": [
+    { "type": "trace_event", "name": "platform_linux-host" },
+    { "type": "fs_write", "path": "tmp/platform_linux/host.txt", "data": "platform_linux-host" },
+    { "type": "fs_read_assert", "path": "tmp/platform_linux/host.txt", "equals": "platform_linux-host" },
+    { "type": "assert_eq_int", "a": 2, "b": 2 }
+  ]
+}

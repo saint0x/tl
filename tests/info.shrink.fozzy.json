@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "info-shrink",
+  "steps": [
+    { "type": "trace_event", "name": "info-shrink" },
+    { "type": "assert_eq_int", "a": 10, "b": 10 }
+  ]
+}

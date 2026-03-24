@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "watcher-lib-host",
+  "steps": [
+    { "type": "trace_event", "name": "watcher_lib-host" },
+    { "type": "fs_write", "path": "tmp/watcher_lib/host.txt", "data": "watcher_lib-host" },
+    { "type": "fs_read_assert", "path": "tmp/watcher_lib/host.txt", "equals": "watcher_lib-host" },
+    { "type": "assert_eq_int", "a": 2, "b": 2 }
+  ]
+}

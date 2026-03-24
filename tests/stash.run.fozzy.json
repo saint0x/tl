@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "stash-run",
+  "steps": [
+    { "type": "trace_event", "name": "stash-run" },
+    { "type": "fs_write", "path": "tmp/stash/run.txt", "data": "stash-run" },
+    { "type": "fs_read_assert", "path": "tmp/stash/run.txt", "equals": "stash-run" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "name": "store-shrink",
+  "steps": [
+    { "type": "trace_event", "name": "store-shrink" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ],
+  "notes": {
+    "minimize": "all"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "pin-unpin-gc-run",
+  "steps": [
+    { "type": "trace_event", "name": "pin_unpin_gc-run" },
+    { "type": "fs_write", "path": "tmp/pin_unpin_gc/run.txt", "data": "pin_unpin_gc-run" },
+    { "type": "fs_read_assert", "path": "tmp/pin_unpin_gc/run.txt", "equals": "pin_unpin_gc-run" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

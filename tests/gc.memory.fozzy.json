@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "gc-memory",
+  "steps": [
+    { "type": "memory_alloc", "bytes": 224, "key": "gc_buf", "tag": "gc" },
+    { "type": "memory_assert_in_use_bytes", "equals": 224 },
+    { "type": "memory_free", "key": "gc_buf" },
+    { "type": "memory_assert_in_use_bytes", "equals": 0 }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "platform-macos-host",
+  "steps": [
+    { "type": "trace_event", "name": "platform_macos-host" },
+    { "type": "fs_write", "path": "tmp/platform_macos/host.txt", "data": "platform_macos-host" },
+    { "type": "fs_read_assert", "path": "tmp/platform_macos/host.txt", "equals": "platform_macos-host" },
+    { "type": "assert_eq_int", "a": 2, "b": 2 }
+  ]
+}

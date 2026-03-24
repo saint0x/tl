@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "cli-run",
+  "steps": [
+    { "type": "trace_event", "name": "cli-run" },
+    { "type": "fs_write", "path": "tmp/cli/run.txt", "data": "cli-run" },
+    { "type": "fs_read_assert", "path": "tmp/cli/run.txt", "equals": "cli-run" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

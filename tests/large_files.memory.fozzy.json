@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "large-files-memory",
+  "steps": [
+    { "type": "memory_alloc", "bytes": 512, "key": "large_files_buf", "tag": "large_files" },
+    { "type": "memory_assert_in_use_bytes", "equals": 512 },
+    { "type": "memory_free", "key": "large_files_buf" },
+    { "type": "memory_assert_in_use_bytes", "equals": 0 }
+  ]
+}

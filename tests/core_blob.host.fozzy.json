@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "core-blob-host",
+  "steps": [
+    { "type": "trace_event", "name": "core_blob-host" },
+    { "type": "fs_write", "path": "tmp/core_blob/host.txt", "data": "core_blob-host" },
+    { "type": "fs_read_assert", "path": "tmp/core_blob/host.txt", "equals": "core_blob-host" },
+    { "type": "assert_eq_int", "a": 2, "b": 2 }
+  ]
+}

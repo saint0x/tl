@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "jj-mapping-shrink",
+  "steps": [
+    { "type": "trace_event", "name": "jj_mapping-shrink" },
+    { "type": "assert_eq_int", "a": 29, "b": 29 }
+  ]
+}

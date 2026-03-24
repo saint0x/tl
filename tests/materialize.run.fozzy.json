@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "materialize-run",
+  "steps": [
+    { "type": "trace_event", "name": "materialize-run" },
+    { "type": "fs_write", "path": "tmp/materialize/run.txt", "data": "materialize-run" },
+    { "type": "fs_read_assert", "path": "tmp/materialize/run.txt", "equals": "materialize-run" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

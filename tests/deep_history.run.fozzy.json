@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "deep-history-run",
+  "steps": [
+    { "type": "trace_event", "name": "deep_history-run" },
+    { "type": "fs_write", "path": "tmp/deep_history/run.txt", "data": "deep_history-run" },
+    { "type": "fs_read_assert", "path": "tmp/deep_history/run.txt", "equals": "deep_history-run" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

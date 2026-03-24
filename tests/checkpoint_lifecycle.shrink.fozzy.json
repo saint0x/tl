@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "checkpoint-lifecycle-shrink",
+  "steps": [
+    { "type": "trace_event", "name": "checkpoint_lifecycle-shrink" },
+    { "type": "assert_eq_int", "a": 6, "b": 6 }
+  ]
+}

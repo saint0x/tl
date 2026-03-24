@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "large-files-run",
+  "steps": [
+    { "type": "trace_event", "name": "large_files-run" },
+    { "type": "fs_write", "path": "tmp/large_files/run.txt", "data": "large_files-run" },
+    { "type": "fs_read_assert", "path": "tmp/large_files/run.txt", "equals": "large_files-run" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

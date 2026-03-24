@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "core-blob-shrink",
+  "steps": [
+    { "type": "trace_event", "name": "core_blob-shrink" },
+    { "type": "assert_eq_int", "a": 31, "b": 31 }
+  ]
+}

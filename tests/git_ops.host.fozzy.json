@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "name": "git-ops-host",
+  "steps": [
+    { "type": "fs_write", "path": "tmp/git_ops/host.txt", "data": "git-ops-host" },
+    { "type": "fs_read_assert", "path": "tmp/git_ops/host.txt", "equals": "git-ops-host" },
+    {
+      "type": "proc_when",
+      "cmd": "echo",
+      "args": ["git-ops-host"],
+      "exit_code": 0,
+      "stdout": "git-ops-host\n"
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "echo",
+      "args": ["git-ops-host"],
+      "expect_exit": 0,
+      "expect_stdout": "git-ops-host\n"
+    }
+  ]
+}

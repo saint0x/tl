@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "info-host",
+  "steps": [
+    { "type": "trace_event", "name": "info-host" },
+    { "type": "fs_write", "path": "tmp/info/host.txt", "data": "info-host" },
+    { "type": "fs_read_assert", "path": "tmp/info/host.txt", "equals": "info-host" },
+    { "type": "assert_eq_int", "a": 2, "b": 2 }
+  ]
+}

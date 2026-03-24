@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "platform-linux-shrink",
+  "steps": [
+    { "type": "trace_event", "name": "platform_linux-shrink" },
+    { "type": "assert_eq_int", "a": 24, "b": 24 }
+  ]
+}

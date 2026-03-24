@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "edge-cases-host",
+  "steps": [
+    { "type": "trace_event", "name": "edge_cases-host" },
+    { "type": "fs_write", "path": "tmp/edge_cases/host.txt", "data": "edge_cases-host" },
+    { "type": "fs_read_assert", "path": "tmp/edge_cases/host.txt", "equals": "edge_cases-host" },
+    { "type": "assert_eq_int", "a": 2, "b": 2 }
+  ]
+}

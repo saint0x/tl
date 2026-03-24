@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "jj-lib-host",
+  "steps": [
+    { "type": "trace_event", "name": "jj_lib-host" },
+    { "type": "fs_write", "path": "tmp/jj_lib/host.txt", "data": "jj_lib-host" },
+    { "type": "fs_read_assert", "path": "tmp/jj_lib/host.txt", "equals": "jj_lib-host" },
+    { "type": "assert_eq_int", "a": 2, "b": 2 }
+  ]
+}

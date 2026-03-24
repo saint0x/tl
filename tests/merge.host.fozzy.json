@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "merge-host",
+  "steps": [
+    { "type": "trace_event", "name": "merge-host" },
+    { "type": "fs_write", "path": "tmp/merge/host.txt", "data": "merge-host" },
+    { "type": "fs_read_assert", "path": "tmp/merge/host.txt", "equals": "merge-host" },
+    { "type": "assert_eq_int", "a": 2, "b": 2 }
+  ]
+}

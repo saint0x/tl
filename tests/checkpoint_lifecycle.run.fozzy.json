@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "checkpoint-lifecycle-run",
+  "steps": [
+    { "type": "trace_event", "name": "checkpoint_lifecycle-run" },
+    { "type": "fs_write", "path": "tmp/checkpoint_lifecycle/run.txt", "data": "checkpoint_lifecycle-run" },
+    { "type": "fs_read_assert", "path": "tmp/checkpoint_lifecycle/run.txt", "equals": "checkpoint_lifecycle-run" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

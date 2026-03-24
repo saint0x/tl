@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "cmd-gc-memory",
+  "steps": [
+    { "type": "memory_alloc", "bytes": 240, "key": "cmd_gc_buf", "tag": "cmd_gc" },
+    { "type": "memory_assert_in_use_bytes", "equals": 240 },
+    { "type": "memory_free", "key": "cmd_gc_buf" },
+    { "type": "memory_assert_in_use_bytes", "equals": 0 }
+  ]
+}

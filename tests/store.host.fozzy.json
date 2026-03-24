@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "name": "store-host",
+  "steps": [
+    { "type": "fs_write", "path": "tmp/store/host.txt", "data": "store-host" },
+    { "type": "fs_read_assert", "path": "tmp/store/host.txt", "equals": "store-host" },
+    {
+      "type": "proc_when",
+      "cmd": "echo",
+      "args": ["store-host"],
+      "exit_code": 0,
+      "stdout": "store-host\n"
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "echo",
+      "args": ["store-host"],
+      "expect_exit": 0,
+      "expect_stdout": "store-host\n"
+    }
+  ]
+}

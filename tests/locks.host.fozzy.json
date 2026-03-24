@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "locks-host",
+  "steps": [
+    { "type": "trace_event", "name": "locks-host" },
+    { "type": "fs_write", "path": "tmp/locks/host.txt", "data": "locks-host" },
+    { "type": "fs_read_assert", "path": "tmp/locks/host.txt", "equals": "locks-host" },
+    { "type": "assert_eq_int", "a": 2, "b": 2 }
+  ]
+}

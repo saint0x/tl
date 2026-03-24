@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "gc-run",
+  "steps": [
+    { "type": "trace_event", "name": "gc-run" },
+    { "type": "fs_write", "path": "tmp/gc/run.txt", "data": "gc-run" },
+    { "type": "fs_read_assert", "path": "tmp/gc/run.txt", "equals": "gc-run" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

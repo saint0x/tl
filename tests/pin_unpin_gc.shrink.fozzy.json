@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "pin-unpin-gc-shrink",
+  "steps": [
+    { "type": "trace_event", "name": "pin_unpin_gc-shrink" },
+    { "type": "assert_eq_int", "a": 5, "b": 5 }
+  ]
+}

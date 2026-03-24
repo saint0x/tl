@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "name": "status-host",
+  "steps": [
+    { "type": "fs_write", "path": "tmp/status/host.txt", "data": "status-host" },
+    { "type": "fs_read_assert", "path": "tmp/status/host.txt", "equals": "status-host" },
+    {
+      "type": "proc_when",
+      "cmd": "echo",
+      "args": ["status-host"],
+      "exit_code": 0,
+      "stdout": "status-host\n"
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "echo",
+      "args": ["status-host"],
+      "expect_exit": 0,
+      "expect_stdout": "status-host\n"
+    }
+  ]
+}

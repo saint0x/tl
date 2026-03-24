@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "jj-conflicts-shrink",
+  "steps": [
+    { "type": "trace_event", "name": "jj_conflicts-shrink" },
+    { "type": "assert_eq_int", "a": 27, "b": 27 }
+  ]
+}

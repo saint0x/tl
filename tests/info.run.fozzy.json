@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "info-run",
+  "steps": [
+    { "type": "trace_event", "name": "info-run" },
+    { "type": "fs_write", "path": "tmp/info/run.txt", "data": "info-run" },
+    { "type": "fs_read_assert", "path": "tmp/info/run.txt", "equals": "info-run" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

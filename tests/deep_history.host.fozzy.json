@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "deep-history-host",
+  "steps": [
+    { "type": "trace_event", "name": "deep_history-host" },
+    { "type": "fs_write", "path": "tmp/deep_history/host.txt", "data": "deep_history-host" },
+    { "type": "fs_read_assert", "path": "tmp/deep_history/host.txt", "equals": "deep_history-host" },
+    { "type": "assert_eq_int", "a": 2, "b": 2 }
+  ]
+}

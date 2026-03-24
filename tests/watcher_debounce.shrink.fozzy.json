@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "watcher-debounce-shrink",
+  "steps": [
+    { "type": "trace_event", "name": "watcher_debounce-shrink" },
+    { "type": "assert_eq_int", "a": 30, "b": 30 }
+  ]
+}

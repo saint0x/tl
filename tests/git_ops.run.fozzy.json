@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "git-ops-run",
+  "steps": [
+    { "type": "trace_event", "name": "git-ops-run" },
+    { "type": "fs_write", "path": "tmp/git_ops/run.txt", "data": "git-ops-run" },
+    { "type": "fs_read_assert", "path": "tmp/git_ops/run.txt", "equals": "git-ops-run" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

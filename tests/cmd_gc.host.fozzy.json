@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "cmd-gc-host",
+  "steps": [
+    { "type": "trace_event", "name": "cmd_gc-host" },
+    { "type": "fs_write", "path": "tmp/cmd_gc/host.txt", "data": "cmd_gc-host" },
+    { "type": "fs_read_assert", "path": "tmp/cmd_gc/host.txt", "equals": "cmd_gc-host" },
+    { "type": "assert_eq_int", "a": 2, "b": 2 }
+  ]
+}

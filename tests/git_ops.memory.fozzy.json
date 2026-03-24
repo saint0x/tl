@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "git-ops-memory",
+  "steps": [
+    { "type": "memory_alloc", "bytes": 168, "key": "git_ops_buf", "tag": "git_ops" },
+    { "type": "memory_assert_in_use_bytes", "equals": 168 },
+    { "type": "memory_free", "key": "git_ops_buf" },
+    { "type": "memory_assert_in_use_bytes", "equals": 0 }
+  ]
+}

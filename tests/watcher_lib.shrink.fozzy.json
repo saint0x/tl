@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "watcher-lib-shrink",
+  "steps": [
+    { "type": "trace_event", "name": "watcher_lib-shrink" },
+    { "type": "assert_eq_int", "a": 23, "b": 23 }
+  ]
+}

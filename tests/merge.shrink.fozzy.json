@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "merge-shrink",
+  "steps": [
+    { "type": "trace_event", "name": "merge-shrink" },
+    { "type": "assert_eq_int", "a": 9, "b": 9 }
+  ]
+}

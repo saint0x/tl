@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "gc-host",
+  "steps": [
+    { "type": "trace_event", "name": "gc-host" },
+    { "type": "fs_write", "path": "tmp/gc/host.txt", "data": "gc-host" },
+    { "type": "fs_read_assert", "path": "tmp/gc/host.txt", "equals": "gc-host" },
+    { "type": "assert_eq_int", "a": 2, "b": 2 }
+  ]
+}

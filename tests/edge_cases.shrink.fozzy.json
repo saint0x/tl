@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "edge-cases-shrink",
+  "steps": [
+    { "type": "trace_event", "name": "edge_cases-shrink" },
+    { "type": "assert_eq_int", "a": 3, "b": 3 }
+  ]
+}

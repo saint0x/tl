@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "locks-run",
+  "steps": [
+    { "type": "trace_event", "name": "locks-run" },
+    { "type": "fs_write", "path": "tmp/locks/run.txt", "data": "locks-run" },
+    { "type": "fs_read_assert", "path": "tmp/locks/run.txt", "equals": "locks-run" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

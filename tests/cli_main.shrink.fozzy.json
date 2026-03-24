@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "cli-main-shrink",
+  "steps": [
+    { "type": "trace_event", "name": "cli_main-shrink" },
+    { "type": "assert_eq_int", "a": 22, "b": 22 }
+  ]
+}

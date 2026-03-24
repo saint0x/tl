@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "main-fuzz",
+  "steps": [
+    { "type": "trace_event", "name": "main-fuzz" },
+    { "type": "rand_u64", "key": "value" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

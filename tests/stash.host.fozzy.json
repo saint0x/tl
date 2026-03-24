@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "name": "stash-host",
+  "steps": [
+    { "type": "fs_write", "path": "tmp/stash/host.txt", "data": "stash-host" },
+    { "type": "fs_read_assert", "path": "tmp/stash/host.txt", "equals": "stash-host" },
+    {
+      "type": "proc_when",
+      "cmd": "echo",
+      "args": ["stash-host"],
+      "exit_code": 0,
+      "stdout": "stash-host\n"
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "echo",
+      "args": ["stash-host"],
+      "expect_exit": 0,
+      "expect_stdout": "stash-host\n"
+    }
+  ]
+}

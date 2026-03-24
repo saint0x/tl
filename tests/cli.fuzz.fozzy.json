@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "cli-fuzz",
+  "steps": [
+    { "type": "trace_event", "name": "cli-fuzz" },
+    { "type": "rand_u64", "key": "value" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

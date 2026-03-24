@@ -16,6 +16,8 @@ Cargo.lock
 
 # Timelapse runtime
 .tl/
+.fozzy/
+tmp/
 
 # JJ workspace
 .jj/

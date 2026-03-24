@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "deep-history-shrink",
+  "steps": [
+    { "type": "trace_event", "name": "deep_history-shrink" },
+    { "type": "assert_eq_int", "a": 4, "b": 4 }
+  ]
+}

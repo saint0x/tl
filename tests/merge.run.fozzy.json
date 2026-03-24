@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "merge-run",
+  "steps": [
+    { "type": "trace_event", "name": "merge-run" },
+    { "type": "fs_write", "path": "tmp/merge/run.txt", "data": "merge-run" },
+    { "type": "fs_read_assert", "path": "tmp/merge/run.txt", "equals": "merge-run" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

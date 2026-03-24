@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "cli-host",
+  "steps": [
+    { "type": "trace_event", "name": "cli-host" },
+    { "type": "fs_write", "path": "tmp/cli/host.txt", "data": "cli-host" },
+    { "type": "fs_read_assert", "path": "tmp/cli/host.txt", "equals": "cli-host" },
+    { "type": "assert_eq_int", "a": 2, "b": 2 }
+  ]
+}

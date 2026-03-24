@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "cli-cmd-gc-memory",
+  "steps": [
+    { "type": "memory_alloc", "bytes": 248, "key": "cli_cmd_gc_buf", "tag": "cli_cmd_gc" },
+    { "type": "memory_assert_in_use_bytes", "equals": 248 },
+    { "type": "memory_free", "key": "cli_cmd_gc_buf" },
+    { "type": "memory_assert_in_use_bytes", "equals": 0 }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "jj-mapping-host",
+  "steps": [
+    { "type": "trace_event", "name": "jj_mapping-host" },
+    { "type": "fs_write", "path": "tmp/jj_mapping/host.txt", "data": "jj_mapping-host" },
+    { "type": "fs_read_assert", "path": "tmp/jj_mapping/host.txt", "equals": "jj_mapping-host" },
+    { "type": "assert_eq_int", "a": 2, "b": 2 }
+  ]
+}

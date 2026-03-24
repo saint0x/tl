@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "name": "util-host",
+  "steps": [
+    { "type": "fs_write", "path": "tmp/util/host.txt", "data": "util-host" },
+    { "type": "fs_read_assert", "path": "tmp/util/host.txt", "equals": "util-host" },
+    {
+      "type": "proc_when",
+      "cmd": "echo",
+      "args": ["util-host"],
+      "exit_code": 0,
+      "stdout": "util-host\n"
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "echo",
+      "args": ["util-host"],
+      "expect_exit": 0,
+      "expect_stdout": "util-host\n"
+    }
+  ]
+}

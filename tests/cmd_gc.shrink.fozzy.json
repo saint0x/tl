@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "cmd-gc-shrink",
+  "steps": [
+    { "type": "trace_event", "name": "cmd_gc-shrink" },
+    { "type": "assert_eq_int", "a": 21, "b": 21 }
+  ]
+}

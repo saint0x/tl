@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "locks-shrink",
+  "steps": [
+    { "type": "trace_event", "name": "locks-shrink" },
+    { "type": "assert_eq_int", "a": 12, "b": 12 }
+  ]
+}
