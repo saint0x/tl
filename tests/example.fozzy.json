@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "name": "example",
+  "steps": [
+    {
+      "type": "trace_event",
+      "name": "setup",
+      "fields": {}
+    },
+    {
+      "type": "rand_u64",
+      "key": "rand"
+    },
+    {
+      "type": "sleep",
+      "duration": "10ms"
+    },
+    {
+      "type": "assert_eq_int",
+      "a": 1,
+      "b": 1,
+      "msg": null
+    }
+  ]
+}

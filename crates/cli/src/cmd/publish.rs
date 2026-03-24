@@ -138,7 +138,7 @@ pub async fn run(
 
     // 8. Create bookmark (Timelapse bookmarks are always under `tl/`).
     // This avoids colliding with Git's default branch bookmarks (e.g. `main`).
-    let raw_bookmark = bookmark.unwrap_or_else(|| "main".to_string());
+    let raw_bookmark = bookmark.unwrap_or_else(|| jj::DEFAULT_TIMELAPSE_BOOKMARK.to_string());
     let bookmark_name = if raw_bookmark.starts_with("tl/") {
         raw_bookmark
     } else {

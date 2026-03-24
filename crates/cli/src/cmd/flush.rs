@@ -31,10 +31,9 @@ pub async fn execute(force: bool) -> Result<()> {
         // Create proactive checkpoint even with no pending changes
         match client.force_checkpoint().await {
             Ok(checkpoint_id) => {
-                let short_id = &checkpoint_id[..8.min(checkpoint_id.len())];
                 println!("{} Created restore point: {}",
                     "✓".green(),
-                    short_id.bright_cyan()
+                    checkpoint_id.bright_cyan()
                 );
                 println!("{}", "Use 'tl restore' to return to this point if needed.".dimmed());
                 Ok(())
@@ -47,10 +46,9 @@ pub async fn execute(force: bool) -> Result<()> {
         // Normal flush - only checkpoint if there are pending changes
         match client.flush_checkpoint().await? {
             Some(checkpoint_id) => {
-                let short_id = &checkpoint_id[..8.min(checkpoint_id.len())];
                 println!("{} Created checkpoint: {}",
                     "✓".green(),
-                    short_id.bright_cyan()
+                    checkpoint_id.bright_cyan()
                 );
                 Ok(())
             }

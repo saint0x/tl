@@ -31,8 +31,8 @@ pub async fn run(
     let mut workspace = jj::load_workspace(&repo_root)
         .context("Failed to load JJ workspace")?;
 
-    // Timelapse pushes only `tl/*` bookmarks. Normalize user input so `-b main`
-    // means `tl/main`.
+    // Timelapse pushes `tl/*` bookmarks. Normalize shorthand names so `-b main`
+    // always means the production branch `tl/main`.
     let bookmark_full = bookmark.as_deref().map(|b| {
         if b.starts_with("tl/") {
             b.to_string()

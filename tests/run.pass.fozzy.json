@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "run-pass",
+  "steps": [
+    { "type": "trace_event", "name": "setup" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

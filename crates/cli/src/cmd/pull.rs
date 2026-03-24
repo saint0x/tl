@@ -61,18 +61,26 @@ pub async fn run(
     // 5. Check for uncommitted changes and auto-stash
     let stash_entry = check_and_auto_stash(&tl_dir, &stash_manager).await?;
 
-    // 6. Choose sync target quickly (prefer main/master, else first remote bookmark)
-    let (_sync_branch_name, remote_commit_id) =
-        match jj::git_ops::get_preferred_remote_head(&workspace, &["main", "master"])? {
-            Some(v) => v,
-            None => {
-                println!("{}", "No branches found on remote.".dimmed());
-                if let Some(stash) = stash_entry {
-                    reapply_stash(&repo_root, &tl_dir, &store, &stash_manager, stash).await?;
-                }
-                return Ok(());
+    // 6. Sync exclusively against the production Timelapse branch.
+    let remote_commit_id = match jj::git_ops::get_remote_bookmark_head(
+        &workspace,
+        jj::DEFAULT_TIMELAPSE_BOOKMARK,
+    )? {
+        Some(v) => v,
+        None => {
+            println!(
+                "{}",
+                format!(
+                    "Remote bookmark '{}' was not found.",
+                    jj::DEFAULT_TIMELAPSE_BOOKMARK
+                ).dimmed()
+            );
+            if let Some(stash) = stash_entry {
+                reapply_stash(&repo_root, &tl_dir, &store, &stash_manager, stash).await?;
             }
-        };
+            return Ok(());
+        }
+    };
 
     // 7. Import remote commit as checkpoint via the daemon (journal is daemon-owned).
     let imported = import_remote_commit_via_daemon(&tl_dir, &remote_commit_id, no_pin).await?;

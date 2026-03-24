@@ -43,6 +43,8 @@ use jj_lib::repo::Repo;            // For Repo trait methods
 use jj_lib::settings::UserSettings;
 use std::path::{Path, PathBuf};
 
+pub const DEFAULT_TIMELAPSE_BOOKMARK: &str = "tl/main";
+
 /// Errors specific to JJ integration
 #[derive(Debug, thiserror::Error)]
 pub enum JjError {
@@ -546,8 +548,25 @@ pub fn create_seed_commit(repo_root: &Path) -> Result<String> {
 pub fn create_and_store_seed(repo_root: &Path, tl_dir: &Path) -> Result<String> {
     let commit_id = create_seed_commit(repo_root)?;
 
+    let store = tl_core::Store::open(repo_root)
+        .context("Failed to open store while recording seed tree")?;
+    let journal = journal::Journal::open(&tl_dir.join("journal"))
+        .context("Failed to open journal while recording seed tree")?;
+
+    let seed_tree_hash = match journal.latest()? {
+        Some(checkpoint) => checkpoint.root_tree.to_hex(),
+        None => {
+            let empty_tree = tl_core::Tree::new();
+            let hash = store.write_tree(&empty_tree)
+                .context("Failed to persist empty seed tree")?;
+            hash.to_hex()
+        }
+    };
+
     let mapping = JjMapping::open(tl_dir)?;
     mapping.set_seed(&commit_id)?;
+    mapping.set_seed_tree(&seed_tree_hash)?;
+    mapping.flush()?;
 
     Ok(commit_id)
 }

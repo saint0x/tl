@@ -23,6 +23,7 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{broadcast, mpsc, oneshot, RwLock};
 use ulid::Ulid;
 use watcher::Watcher;
+use watcher::ignore::{IgnoreConfig, IgnoreRules};
 
 /// Flush checkpoint request with response channel
 #[derive(Clone, Copy, Debug)]
@@ -725,6 +726,10 @@ impl Daemon {
                             }
                             tokio::time::sleep(Duration::from_millis(50)).await;
                         }
+                        if pending_paths.is_empty() {
+                            tracing::info!("Watcher reported no pending paths; running reconciliation scan for reliable flush");
+                            pending_paths.extend(self.scan_dirty_paths_from_working_tree()?);
+                        }
                         self.status.write().await.watcher_paths = pending_paths.len();
                     }
 
@@ -922,6 +927,99 @@ impl Daemon {
         }
 
         Ok((bytes_added, bytes_removed))
+    }
+
+    fn scan_dirty_paths_from_working_tree(&self) -> Result<HashSet<Arc<Path>>> {
+        let repo_root = self.store.root();
+        let ignore_rules = IgnoreRules::load(repo_root, IgnoreConfig::default())
+            .context("Failed to load ignore rules for reconciliation scan")?;
+
+        let mut dirty_paths = HashSet::new();
+        let mut seen_paths = HashSet::new();
+
+        for entry in walkdir::WalkDir::new(repo_root)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| {
+                if e.path() == repo_root {
+                    return true;
+                }
+                let rel_path = e.path().strip_prefix(repo_root).unwrap_or(e.path());
+                !ignore_rules.should_ignore(rel_path)
+            })
+        {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+
+            let metadata = match std::fs::symlink_metadata(entry.path()) {
+                Ok(metadata) => metadata,
+                Err(_) => continue,
+            };
+
+            if !(metadata.is_file() || metadata.file_type().is_symlink()) {
+                continue;
+            }
+
+            let rel_path = entry.path()
+                .strip_prefix(repo_root)
+                .context("Failed to relativize reconciliation path")?;
+            let rel_path_buf = rel_path.to_path_buf();
+            seen_paths.insert(rel_path_buf.clone());
+
+            let rel_path_arc: Arc<Path> = Arc::from(rel_path_buf.clone());
+
+            let current_differs = match self.pathmap.get(&rel_path_buf) {
+                None => true,
+                Some(existing_entry) if metadata.file_type().is_symlink() => {
+                    if existing_entry.kind != EntryKind::Symlink {
+                        true
+                    } else {
+                        let target = std::fs::read_link(entry.path())?;
+                        let target_hash = tl_core::hash::git::hash_blob(
+                            target.to_string_lossy().as_bytes()
+                        );
+                        existing_entry.blob_hash != target_hash
+                    }
+                }
+                Some(existing_entry) if metadata.is_file() => {
+                    #[cfg(unix)]
+                    let mode = {
+                        use std::os::unix::fs::MetadataExt;
+                        metadata.mode()
+                    };
+                    #[cfg(not(unix))]
+                    let mode = if metadata.permissions().readonly() { 0o444 } else { 0o644 };
+
+                    let blob_hash = tl_core::hash::hash_file_stable(entry.path(), 3)?;
+                    existing_entry.blob_hash != blob_hash
+                        || existing_entry.mode != mode
+                        || !matches!(existing_entry.kind, EntryKind::File | EntryKind::ExecutableFile)
+                }
+                Some(_) => true,
+            };
+
+            if current_differs {
+                dirty_paths.insert(rel_path_arc);
+            }
+        }
+
+        for (path_bytes, _entry) in self.pathmap.entries() {
+            let path_str = std::str::from_utf8(path_bytes.as_slice())
+                .context("Invalid UTF-8 in cached pathmap entry")?;
+            let rel_path = PathBuf::from(path_str);
+
+            if ignore_rules.should_ignore(&rel_path) {
+                continue;
+            }
+
+            if !seen_paths.contains(&rel_path) {
+                dirty_paths.insert(Arc::from(rel_path));
+            }
+        }
+
+        Ok(dirty_paths)
     }
 
     /// Graceful shutdown

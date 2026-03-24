@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "name": "host-pass",
+  "steps": [
+    { "type": "fs_write", "path": "tmp/host-smoke.txt", "data": "hello-host" },
+    { "type": "fs_read_assert", "path": "tmp/host-smoke.txt", "equals": "hello-host" },
+    {
+      "type": "proc_when",
+      "cmd": "echo",
+      "args": ["fozzy-host"],
+      "exit_code": 0,
+      "stdout": "fozzy-host\n"
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "echo",
+      "args": ["fozzy-host"],
+      "expect_exit": 0,
+      "expect_stdout": "fozzy-host\n"
+    }
+  ]
+}

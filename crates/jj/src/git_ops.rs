@@ -130,53 +130,22 @@ pub fn native_git_push(
             anyhow::bail!("Branch {} not found or not at a single commit", full_name);
         }
     } else {
-        // Auto-detect: prefer Timelapse bookmarks, then fall back.
-        let mut auto_bookmark: Option<String> = None;
-
-        // Priority 1: tl/main
-        let tl_main_ref: &RefName = "tl/main".as_ref();
-        if view.get_local_bookmark(tl_main_ref).is_present() {
-            auto_bookmark = Some("tl/main".to_string());
+        let ref_name: &RefName = crate::DEFAULT_TIMELAPSE_BOOKMARK.as_ref();
+        let target = view.get_local_bookmark(ref_name);
+        if let Some(local_commit_id) = target.as_normal() {
+            let remote_symbol = ref_name.to_remote_symbol(origin_remote);
+            let remote_ref = view.get_remote_bookmark(remote_symbol);
+            let remote_commit_id = remote_ref.target.as_normal().map(|id| id.hex());
+            branches_to_push.push((
+                crate::DEFAULT_TIMELAPSE_BOOKMARK.to_string(),
+                Some(local_commit_id.hex()),
+                remote_commit_id,
+            ));
         } else {
-            // Priority 2: tl/master
-            let tl_master_ref: &RefName = "tl/master".as_ref();
-            if view.get_local_bookmark(tl_master_ref).is_present() {
-                auto_bookmark = Some("tl/master".to_string());
-            } else {
-                // Priority 3: First available tl/* bookmark
-                for (bookmark_name, target) in view.local_bookmarks() {
-                    if !bookmark_name.as_str().starts_with("tl/") {
-                        continue;
-                    }
-                    if target.as_normal().is_some() {
-                        auto_bookmark = Some(bookmark_name.as_str().to_string());
-                        break;
-                    }
-                }
-            }
-        }
-
-        match auto_bookmark {
-            Some(name) => {
-                // Found bookmark - collect it for push
-                let ref_name: &RefName = name.as_ref();
-                let target = view.get_local_bookmark(ref_name);
-                if let Some(local_commit_id) = target.as_normal() {
-                    let remote_symbol = ref_name.to_remote_symbol(origin_remote);
-                    let remote_ref = view.get_remote_bookmark(remote_symbol);
-                    let remote_commit_id = remote_ref.target.as_normal().map(|id| id.hex());
-                    branches_to_push.push((
-                        name,
-                        Some(local_commit_id.hex()),
-                        remote_commit_id,
-                    ));
-                }
-            }
-            None => {
-                anyhow::bail!(
-                    "No bookmark to push. Run 'tl publish' first, or specify --all or -b <name>"
-                );
-            }
+            anyhow::bail!(
+                "Default Timelapse bookmark '{}' not found. Run 'tl publish HEAD' first or specify -b <name>",
+                crate::DEFAULT_TIMELAPSE_BOOKMARK
+            );
         }
     }
 
@@ -424,22 +393,10 @@ pub fn native_git_fetch_filtered(workspace: &mut Workspace, bookmark_expr: Strin
 /// This is critical for performance on large remotes: enumerating local
 /// bookmarks into a giant union of refspecs can dominate runtime.
 pub fn native_git_fetch_for_pull(workspace: &mut Workspace) -> Result<()> {
-    // Fast path: fetch only common default branches.
-    let preferred = ["main", "master", "trunk", "develop"];
-    let mut exprs = Vec::with_capacity(preferred.len());
-    for name in preferred {
-        exprs.push(StringExpression::exact(name.to_string()));
-    }
-
-    native_git_fetch_filtered(workspace, StringExpression::union_all(exprs))?;
-
-    // If we still can't find a remote head, fall back to fetching everything.
-    // This preserves correctness for repos whose default branch is not common.
-    if get_preferred_remote_head(workspace, &preferred)?.is_none() {
-        native_git_fetch_filtered(workspace, StringExpression::all())?;
-    }
-
-    Ok(())
+    native_git_fetch_filtered(
+        workspace,
+        StringExpression::exact(crate::DEFAULT_TIMELAPSE_BOOKMARK.to_string()),
+    )
 }
 
 /// Get information about remote branches after fetch without expensive graph
@@ -498,36 +455,20 @@ pub fn get_remote_branch_updates_fast(workspace: &jj_lib::workspace::Workspace) 
     Ok(branches)
 }
 
-/// Return the first matching remote branch head (name + commit hex) for origin.
-///
-/// This avoids building a full branch list and avoids expensive ahead/behind
-/// computations. Used by `tl pull` to pick a sync target quickly.
-pub fn get_preferred_remote_head(
+/// Return the target commit for a specific remote bookmark on origin.
+pub fn get_remote_bookmark_head(
     workspace: &jj_lib::workspace::Workspace,
-    preferred: &[&str],
-) -> Result<Option<(String, String)>> {
+    bookmark_name: &str,
+) -> Result<Option<String>> {
     let repo = workspace.repo_loader().load_at_head()
         .context("Failed to load repository")?;
 
     let view = repo.view();
     let origin_remote = RemoteName::new("origin");
-
-    for name in preferred {
-        let ref_name: &RefName = (*name).as_ref();
-        let remote_symbol = ref_name.to_remote_symbol(&origin_remote);
-        let remote_ref = view.get_remote_bookmark(remote_symbol);
-        if let Some(id) = remote_ref.target.as_normal() {
-            return Ok(Some((name.to_string(), id.hex())));
-        }
-    }
-
-    for (bookmark_name, remote_ref) in view.remote_bookmarks(&origin_remote) {
-        if let Some(id) = remote_ref.target.as_normal() {
-            return Ok(Some((bookmark_name.as_str().to_string(), id.hex())));
-        }
-    }
-
-    Ok(None)
+    let ref_name: &RefName = bookmark_name.as_ref();
+    let remote_symbol = ref_name.to_remote_symbol(&origin_remote);
+    let remote_ref = view.get_remote_bookmark(remote_symbol);
+    Ok(remote_ref.target.as_normal().map(|id| id.hex()))
 }
 
 /// Calculate how many commits ahead and behind two branches are

@@ -6,10 +6,10 @@
 use anyhow::{Context, Result};
 use crate::util;
 use crate::cmd::restore::restore_tree;
-use journal::StashManager;
+use journal::{StashEntry, StashManager};
 use owo_colors::OwoColorize;
 use tl_core::Store;
-use tl_core::hash::git::hash_blob;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub async fn run(no_sync: bool, prune: bool) -> Result<()> {
     // 1. Find repository root
@@ -67,7 +67,7 @@ pub async fn run(no_sync: bool, prune: bool) -> Result<()> {
             println!("  {} {} ({})", branch.name.cyan(), remote_id.dimmed(), status);
         }
     } else {
-        println!("{}", "No tl/* branches found on remote".dimmed());
+        println!("{}", "No Timelapse remote bookmarks found".dimmed());
     }
 
     // 6. Handle prune flag
@@ -97,43 +97,50 @@ async fn sync_working_directory(
     branches: &[jj::RemoteBranchInfo],
 ) -> Result<()> {
     // Find branches that have updates (remote differs from local)
-    let updated_branches: Vec<_> = branches.iter()
-        .filter(|b| {
-            match (&b.local_commit_id, &b.remote_commit_id) {
-                (Some(local), Some(remote)) => local != remote && !b.is_diverged,
-                (None, Some(_)) => true, // New remote branch
-                _ => false,
-            }
-        })
-        .collect();
+    let sync_branch = match branches.iter().find(|b| b.name == jj::DEFAULT_TIMELAPSE_BOOKMARK) {
+        Some(branch) => branch,
+        None => {
+            println!(
+                "{}",
+                format!(
+                    "Remote bookmark '{}' is not present; skipping working directory sync.",
+                    jj::DEFAULT_TIMELAPSE_BOOKMARK
+                ).dimmed()
+            );
+            return Ok(());
+        }
+    };
 
-    if updated_branches.is_empty() {
+    let branch_needs_sync = match (&sync_branch.local_commit_id, &sync_branch.remote_commit_id) {
+        (Some(local), Some(remote)) => local != remote && !sync_branch.is_diverged,
+        (None, Some(_)) => true,
+        _ => false,
+    };
+
+    if !branch_needs_sync {
         println!("{}", "Working directory already up to date".dimmed());
         return Ok(());
     }
 
     // Check for uncommitted changes and auto-stash
     let stash_manager = StashManager::new(tl_dir);
-    let stashed = check_and_auto_stash(repo_root, tl_dir, &stash_manager).await?;
+    let stash_entry = check_and_auto_stash(tl_dir, &stash_manager).await?;
 
     // Sync each updated branch
     println!("{}", "Syncing working directory...".dimmed());
 
     let mut any_synced = false;
-    for branch in &updated_branches {
-        if let Some(remote_commit_id) = &branch.remote_commit_id {
-            let short_id = &remote_commit_id[..12.min(remote_commit_id.len())];
-            println!("  Updating {} to {}", branch.name.cyan(), short_id.green());
+    if let Some(remote_commit_id) = &sync_branch.remote_commit_id {
+        let short_id = &remote_commit_id[..12.min(remote_commit_id.len())];
+        println!("  Updating {} to {}", sync_branch.name.cyan(), short_id.green());
 
-            // Export commit to working directory
-            match jj::git_ops::export_commit_to_dir(workspace, remote_commit_id, repo_root) {
-                Ok(()) => {
-                    println!("    {} Files synced", "✓".green());
-                    any_synced = true;
-                }
-                Err(e) => {
-                    println!("    {} Failed to sync: {}", "✗".red(), e);
-                }
+        match jj::git_ops::export_commit_to_dir(workspace, remote_commit_id, repo_root) {
+            Ok(()) => {
+                println!("    {} Files synced", "✓".green());
+                any_synced = true;
+            }
+            Err(e) => {
+                println!("    {} Failed to sync: {}", "✗".red(), e);
             }
         }
     }
@@ -152,8 +159,8 @@ async fn sync_working_directory(
     }
 
     // Re-apply stash if we stashed changes
-    if stashed {
-        reapply_stash(repo_root, tl_dir, &stash_manager)?;
+    if let Some(stash) = stash_entry {
+        reapply_stash(repo_root, tl_dir, &stash_manager, stash)?;
     }
 
     println!();
@@ -164,118 +171,57 @@ async fn sync_working_directory(
 
 /// Check for uncommitted changes and auto-stash them
 async fn check_and_auto_stash(
-    repo_root: &std::path::Path,
     tl_dir: &std::path::Path,
     stash_manager: &StashManager,
-) -> Result<bool> {
-    // Get the latest checkpoint to compare against
+) -> Result<Option<StashEntry>> {
     let socket_path = tl_dir.join("state/daemon.sock");
-    let resilient_client = crate::ipc::ResilientIpcClient::new(socket_path);
+    let resilient = crate::ipc::ResilientIpcClient::new(socket_path);
 
-    let mut client = match resilient_client.connect_with_retry().await {
-        Ok(c) => c,
-        Err(_) => return Ok(false), // No daemon, assume no changes
-    };
-
-    let latest = match client.get_head().await {
-        Ok(Some(cp)) => cp,
-        _ => return Ok(false), // No checkpoint, nothing to stash
-    };
-
-    // Open store and compare current state
-    let store = Store::open(repo_root)?;
-    let latest_tree = store.read_tree(latest.root_tree)?;
-
-    // Quick check: scan working directory for changes
-    let has_changes = check_for_changes(repo_root, &store, &latest_tree)?;
-
-    if !has_changes {
-        return Ok(false);
-    }
-
-    // Auto-stash: create a checkpoint of current state
-    println!("{}", "Auto-stashing uncommitted changes...".dimmed());
-
-    // Force a checkpoint via flush
-    if let Err(e) = client.flush_checkpoint().await {
-        println!("  {} Could not create stash checkpoint: {}", "⚠".yellow(), e);
-        return Ok(false);
-    }
-
-    // Get the new checkpoint ID
-    let stash_cp = match client.get_head().await {
-        Ok(Some(cp)) => cp,
-        _ => return Ok(false),
-    };
-
-    // Save stash entry
-    let stash_entry = journal::StashEntry {
-        checkpoint_id: stash_cp.id,
-        created_at_ms: stash_cp.ts_unix_ms,
-        message: Some("Auto-stash before fetch".to_string()),
-        base_checkpoint_id: Some(latest.id),
-    };
-
-    stash_manager.push(stash_entry)?;
-    let stash_id_str = stash_cp.id.to_string();
-    let stash_id_short = &stash_id_str[..8];
-    println!("  {} Stashed changes at {}", "✓".green(), stash_id_short.yellow());
-
-    Ok(true)
-}
-
-/// Check if working directory has changes compared to tree
-fn check_for_changes(
-    repo_root: &std::path::Path,
-    store: &Store,
-    tree: &tl_core::Tree,
-) -> Result<bool> {
-    use std::collections::HashSet;
-
-    let mut tree_paths: HashSet<String> = HashSet::new();
-
-    for (path_bytes, entry) in tree.entries_with_paths() {
-        let path_str = std::str::from_utf8(path_bytes)?;
-        tree_paths.insert(path_str.to_string());
-
-        let file_path = repo_root.join(path_str);
-
-        // Check if file exists
-        if !file_path.exists() {
-            return Ok(true); // File deleted
-        }
-
-        // Check if content changed (compare blob hashes)
-        if let Ok(content) = std::fs::read(&file_path) {
-            let current_hash = hash_blob(&content);
-            if current_hash != entry.blob_hash {
-                return Ok(true); // Content changed
-            }
-        }
-    }
-
-    // Check for new files (not in tree)
-    for entry in walkdir::WalkDir::new(repo_root)
-        .into_iter()
-        .filter_entry(|e| {
-            let path = e.path();
-            !path.starts_with(repo_root.join(".tl")) &&
-            !path.starts_with(repo_root.join(".git")) &&
-            !path.starts_with(repo_root.join(".jj"))
-        })
+    let base = match resilient
+        .send_request_resilient(&crate::ipc::IpcRequest::GetHead)
+        .await?
     {
-        if let Ok(entry) = entry {
-            if entry.file_type().is_file() {
-                let rel_path = entry.path().strip_prefix(repo_root)?;
-                let rel_str = rel_path.to_string_lossy().to_string();
-                if !tree_paths.contains(&rel_str) {
-                    return Ok(true); // New file
-                }
+        crate::ipc::IpcResponse::Head(cp) => cp,
+        crate::ipc::IpcResponse::Error(e) => anyhow::bail!("Daemon error: {}", e),
+        _ => anyhow::bail!("Unexpected response to GetHead"),
+    };
+    let base_id = base.as_ref().map(|cp| cp.id);
+
+    let mut sleep_ms = 50u64;
+    for _ in 0..5 {
+        match resilient
+            .send_request_resilient(&crate::ipc::IpcRequest::FlushCheckpointFast)
+            .await?
+        {
+            crate::ipc::IpcResponse::CheckpointFlushed(Some(id_str)) => {
+                let checkpoint_id = ulid::Ulid::from_string(&id_str)?;
+                println!("{}", "Auto-stashing uncommitted changes...".dimmed());
+
+                let entry = StashEntry {
+                    checkpoint_id,
+                    created_at_ms: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)?
+                        .as_millis() as u64,
+                    message: Some("Auto-stash before fetch".to_string()),
+                    base_checkpoint_id: base_id,
+                };
+
+                stash_manager.push(entry.clone())?;
+                let short_stash_id = &checkpoint_id.to_string()[..8];
+                println!("  {} Stashed changes at {}", "✓".green(), short_stash_id.yellow());
+
+                return Ok(Some(entry));
             }
+            crate::ipc::IpcResponse::CheckpointFlushed(None) => {
+                tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
+                sleep_ms = (sleep_ms * 2).min(400);
+            }
+            crate::ipc::IpcResponse::Error(e) => anyhow::bail!("Daemon error: {}", e),
+            _ => anyhow::bail!("Unexpected response to FlushCheckpointFast"),
         }
     }
 
-    Ok(false)
+    Ok(None)
 }
 
 /// Re-apply stashed changes after sync
@@ -283,11 +229,13 @@ fn reapply_stash(
     repo_root: &std::path::Path,
     tl_dir: &std::path::Path,
     stash_manager: &StashManager,
+    stash_entry: StashEntry,
 ) -> Result<()> {
-    let stash_entry = match stash_manager.pop()? {
-        Some(entry) => entry,
+    match stash_manager.pop()? {
+        Some(entry) if entry.checkpoint_id == stash_entry.checkpoint_id => {}
+        Some(_) => anyhow::bail!("Stash stack changed during fetch"),
         None => return Ok(()),
-    };
+    }
 
     println!();
     println!("{}", "Re-applying stashed changes...".dimmed());

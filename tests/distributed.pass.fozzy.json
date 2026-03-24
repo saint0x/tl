@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "name": "distributed-pass",
+  "distributed": {
+    "node_count": 3,
+    "steps": [
+      { "type": "client_put", "node": "n0", "key": "k", "value": "v1" },
+      { "type": "client_put", "node": "n1", "key": "k", "value": "v1" },
+      { "type": "client_put", "node": "n2", "key": "k", "value": "v1" },
+      { "type": "tick", "duration": "20ms" }
+    ],
+    "invariants": [
+      { "type": "kv_present_on_all", "key": "k" },
+      { "type": "kv_all_equal", "key": "k" }
+    ]
+  }
+}

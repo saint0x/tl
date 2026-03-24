@@ -445,39 +445,45 @@ pub fn publish_checkpoint(
 
                 (vec![parent_commit_id], parent_tree_id, true) // True parent: touched_paths valid
             } else {
-                // Parent not published - use seed tree as fallback (need tree diff)
-                let wc_commit_id = Repo::view(mut_repo).get_wc_commit_id(workspace.workspace_name())
-                    .ok_or_else(|| anyhow::anyhow!("No working copy commit found"))?;
-
-                let seed_tree_id = mapping.get_seed()?.and_then(|seed_commit_id_str| {
-                    // Use hex::decode + CommitId::new to avoid lifetime issues
+                // Parent not published - anchor to the Timelapse seed commit if available.
+                // This preserves a single, stable lineage base instead of hanging the commit
+                // off whatever working-copy commit happens to be current.
+                let seed_commit = mapping.get_seed()?.and_then(|seed_commit_id_str| {
                     let seed_commit_id = jj_lib::backend::CommitId::new(
                         hex::decode(&seed_commit_id_str).ok()?
                     );
-                    match jj_store.get_commit(&seed_commit_id) {
-                        Ok(seed_commit) => {
-                            seed_commit.tree_ids().as_resolved().cloned()
-                        }
+                    let seed_tree_id = match jj_store.get_commit(&seed_commit_id) {
+                        Ok(seed_commit) => seed_commit.tree_ids().as_resolved().cloned(),
                         Err(_) => None,
-                    }
+                    };
+                    Some((seed_commit_id, seed_tree_id))
                 });
-                (vec![wc_commit_id.clone()], seed_tree_id, false) // Seed fallback: need tree diff
+
+                match seed_commit {
+                    Some((seed_commit_id, seed_tree_id)) => {
+                        (vec![seed_commit_id], seed_tree_id, false)
+                    }
+                    None => {
+                        (vec![Repo::store(mut_repo).root_commit_id().clone()], None, false)
+                    }
+                }
             }
         } else {
             // Root checkpoint - try to use seed commit for incremental conversion
-            let seed_tree_id = mapping.get_seed()?.and_then(|seed_commit_id_str| {
-                // Use hex::decode + CommitId::new to avoid lifetime issues
+            let seed_commit = mapping.get_seed()?.and_then(|seed_commit_id_str| {
                 let seed_commit_id = jj_lib::backend::CommitId::new(
                     hex::decode(&seed_commit_id_str).ok()?
                 );
-                match jj_store.get_commit(&seed_commit_id) {
-                    Ok(seed_commit) => {
-                        seed_commit.tree_ids().as_resolved().cloned()
-                    }
+                let seed_tree_id = match jj_store.get_commit(&seed_commit_id) {
+                    Ok(seed_commit) => seed_commit.tree_ids().as_resolved().cloned(),
                     Err(_) => None,
-                }
+                };
+                Some((seed_commit_id, seed_tree_id))
             });
-            (vec![Repo::store(mut_repo).root_commit_id().clone()], seed_tree_id, false) // Seed fallback: need tree diff
+            match seed_commit {
+                Some((seed_commit_id, seed_tree_id)) => (vec![seed_commit_id], seed_tree_id, false),
+                None => (vec![Repo::store(mut_repo).root_commit_id().clone()], None, false),
+            }
         };
 
     // Determine which paths to process for incremental conversion
@@ -628,7 +634,6 @@ pub fn publish_range(
             mapping,
             &jj_store,
             tx.repo_mut(),
-            &workspace_name,
             last_commit.as_ref(),
         )?;
 
@@ -706,7 +711,6 @@ fn determine_parents(
     mapping: &crate::mapping::JjMapping,
     jj_store: &std::sync::Arc<jj_lib::store::Store>,
     mut_repo: &jj_lib::repo::MutableRepo,
-    workspace_name: &jj_lib::ref_name::WorkspaceName,
     last_commit: Option<&jj_lib::commit::Commit>,
 ) -> Result<(Vec<jj_lib::backend::CommitId>, Option<jj_lib::backend::TreeId>, bool)> {
     use jj_lib::repo::Repo;
@@ -732,35 +736,36 @@ fn determine_parents(
             return Ok((vec![parent_commit_id], parent_tree_id, true));
         }
 
-        // Parent not published - use seed tree as fallback
-        let wc_commit_id = Repo::view(mut_repo).get_wc_commit_id(workspace_name)
-            .ok_or_else(|| anyhow::anyhow!("No working copy commit found"))?;
-
-        let seed_tree_id = mapping.get_seed()?.and_then(|seed_commit_id_str| {
+        // Parent not published - anchor to the Timelapse seed commit if available.
+        if let Some(seed_commit_id_str) = mapping.get_seed()? {
             let seed_commit_id = jj_lib::backend::CommitId::new(
-                hex::decode(&seed_commit_id_str).ok()?
+                hex::decode(&seed_commit_id_str).context("Invalid seed commit hex")?
             );
-            match jj_store.get_commit(&seed_commit_id) {
+
+            let seed_tree_id = match jj_store.get_commit(&seed_commit_id) {
                 Ok(seed_commit) => seed_commit.tree_ids().as_resolved().cloned(),
                 Err(_) => None,
-            }
-        });
+            };
 
-        return Ok((vec![wc_commit_id.clone()], seed_tree_id, false));
+            return Ok((vec![seed_commit_id], seed_tree_id, false));
+        }
+
+        return Ok((vec![Repo::store(mut_repo).root_commit_id().clone()], None, false));
     }
 
-    // Root checkpoint - use seed commit
-    let seed_tree_id = mapping.get_seed()?.and_then(|seed_commit_id_str| {
+    // Root checkpoint - use seed commit when present.
+    if let Some(seed_commit_id_str) = mapping.get_seed()? {
         let seed_commit_id = jj_lib::backend::CommitId::new(
-            hex::decode(&seed_commit_id_str).ok()?
+            hex::decode(&seed_commit_id_str).context("Invalid seed commit hex")?
         );
-        match jj_store.get_commit(&seed_commit_id) {
+        let seed_tree_id = match jj_store.get_commit(&seed_commit_id) {
             Ok(seed_commit) => seed_commit.tree_ids().as_resolved().cloned(),
             Err(_) => None,
-        }
-    });
+        };
+        return Ok((vec![seed_commit_id], seed_tree_id, false));
+    }
 
-    Ok((vec![Repo::store(mut_repo).root_commit_id().clone()], seed_tree_id, false))
+    Ok((vec![Repo::store(mut_repo).root_commit_id().clone()], None, false))
 }
 
 /// Load the seed commit's tree from TL storage
@@ -771,11 +776,6 @@ fn load_seed_tree(
     store: &Store,
     mapping: &crate::mapping::JjMapping,
 ) -> Result<Tree> {
-    // Get seed checkpoint tree hash
-    // Note: We store the seed's root_tree hash during init
-    // For now, we return an empty tree as fallback - the actual seed tree
-    // would need to be stored during init
-
     // Check if we have a seed tree stored
     if let Some(seed_tree_hash) = mapping.get_seed_tree()? {
         // Load the tree from store
@@ -785,9 +785,7 @@ fn load_seed_tree(
             .context("Failed to read seed tree");
     }
 
-    // No seed tree - return empty tree as fallback
-    // This will cause full tree diff (all files are "added")
-    Ok(Tree::new())
+    anyhow::bail!("Missing Timelapse seed tree. Reinitialize the repository to restore publish lineage.")
 }
 
 /// Compute the set of paths that differ between two trees
