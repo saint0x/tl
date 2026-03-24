@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "test-git-parity-run",
+  "steps": [
+    { "type": "trace_event", "name": "test-git-parity-run" },
+    { "type": "fs_write", "path": "tmp/test_git_parity/run.txt", "data": "test-git-parity-run" },
+    { "type": "fs_read_assert", "path": "tmp/test_git_parity/run.txt", "equals": "test-git-parity-run" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "name": "hash-host",
+  "steps": [
+    { "type": "fs_write", "path": "tmp/hash/host.txt", "data": "hash-host" },
+    { "type": "fs_read_assert", "path": "tmp/hash/host.txt", "equals": "hash-host" },
+    {
+      "type": "proc_when",
+      "cmd": "echo",
+      "args": ["hash-host"],
+      "exit_code": 0,
+      "stdout": "hash-host\n"
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "echo",
+      "args": ["hash-host"],
+      "expect_exit": 0,
+      "expect_stdout": "hash-host\n"
+    }
+  ]
+}

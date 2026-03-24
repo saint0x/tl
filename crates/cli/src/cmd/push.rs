@@ -7,7 +7,7 @@
 
 use anyhow::{Context, Result};
 use crate::util;
-use jj::git_ops::{BranchPushResult, BranchPushStatus};
+use jj::git_ops::BranchPushStatus;
 use owo_colors::OwoColorize;
 
 pub async fn run(
@@ -31,22 +31,22 @@ pub async fn run(
     let mut workspace = jj::load_workspace(&repo_root)
         .context("Failed to load JJ workspace")?;
 
-    // Timelapse pushes `tl/*` bookmarks. Normalize shorthand names so `-b main`
-    // always means the production branch `tl/main`.
-    let bookmark_full = bookmark.as_deref().map(|b| {
-        if b.starts_with("tl/") {
-            b.to_string()
-        } else {
-            format!("tl/{}", b)
-        }
-    });
-    let bookmark_ref = bookmark_full.as_deref();
+    let bookmark_was_explicit = bookmark.is_some();
+    let resolved_bookmark = if all {
+        None
+    } else {
+        Some(match bookmark {
+            Some(bookmark) => bookmark,
+            None => util::resolve_publish_branch(&repo_root)?,
+        })
+    };
+    let bookmark_ref = resolved_bookmark.as_deref();
 
     // Execute native git push (now returns detailed results)
     let results = jj::git_ops::native_git_push(&mut workspace, bookmark_ref, all, force)?;
 
     // Show auto-detected bookmark if neither --all nor -b was specified
-    if bookmark.is_none() && !all && !results.is_empty() {
+    if !bookmark_was_explicit && !all && !results.is_empty() {
         if let Some(first_result) = results.first() {
             println!("{}", format!("Using bookmark: {}", first_result.name).dimmed());
         }

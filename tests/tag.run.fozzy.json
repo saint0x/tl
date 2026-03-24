@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "tag-run",
+  "steps": [
+    { "type": "trace_event", "name": "tag-run" },
+    { "type": "fs_write", "path": "tmp/tag/run.txt", "data": "tag-run" },
+    { "type": "fs_read_assert", "path": "tmp/tag/run.txt", "equals": "tag-run" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

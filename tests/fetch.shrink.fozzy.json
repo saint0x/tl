@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "name": "fetch-shrink",
+  "steps": [
+    { "type": "trace_event", "name": "fetch-shrink" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ],
+  "notes": {
+    "minimize": "all"
+  }
+}

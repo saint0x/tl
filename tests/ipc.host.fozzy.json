@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "name": "ipc-host",
+  "steps": [
+    { "type": "fs_write", "path": "tmp/ipc/host.txt", "data": "ipc-host" },
+    { "type": "fs_read_assert", "path": "tmp/ipc/host.txt", "equals": "ipc-host" },
+    {
+      "type": "proc_when",
+      "cmd": "echo",
+      "args": ["ipc-host"],
+      "exit_code": 0,
+      "stdout": "ipc-host\n"
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "echo",
+      "args": ["ipc-host"],
+      "expect_exit": 0,
+      "expect_stdout": "ipc-host\n"
+    }
+  ]
+}

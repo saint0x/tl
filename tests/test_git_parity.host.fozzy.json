@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "name": "test-git-parity-host",
+  "steps": [
+    { "type": "fs_write", "path": "tmp/test_git_parity/host.txt", "data": "test-git-parity-host" },
+    { "type": "fs_read_assert", "path": "tmp/test_git_parity/host.txt", "equals": "test-git-parity-host" },
+    {
+      "type": "proc_when",
+      "cmd": "echo",
+      "args": ["test-git-parity-host"],
+      "exit_code": 0,
+      "stdout": "test-git-parity-host\n"
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "echo",
+      "args": ["test-git-parity-host"],
+      "expect_exit": 0,
+      "expect_stdout": "test-git-parity-host\n"
+    }
+  ]
+}

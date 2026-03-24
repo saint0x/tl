@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "remote-run",
+  "steps": [
+    { "type": "trace_event", "name": "remote-run" },
+    { "type": "fs_write", "path": "tmp/remote/run.txt", "data": "remote-run" },
+    { "type": "fs_read_assert", "path": "tmp/remote/run.txt", "equals": "remote-run" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

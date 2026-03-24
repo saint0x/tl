@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "name": "tag-host",
+  "steps": [
+    { "type": "fs_write", "path": "tmp/tag/host.txt", "data": "tag-host" },
+    { "type": "fs_read_assert", "path": "tmp/tag/host.txt", "equals": "tag-host" },
+    {
+      "type": "proc_when",
+      "cmd": "echo",
+      "args": ["tag-host"],
+      "exit_code": 0,
+      "stdout": "tag-host\n"
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "echo",
+      "args": ["tag-host"],
+      "expect_exit": 0,
+      "expect_stdout": "tag-host\n"
+    }
+  ]
+}

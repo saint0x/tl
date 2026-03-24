@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "name": "fetch-explore",
+  "distributed": {
+    "node_count": 3,
+    "steps": [
+      { "type": "client_put", "node": "n0", "key": "fetch", "value": "v1" },
+      { "type": "client_put", "node": "n1", "key": "fetch", "value": "v1" },
+      { "type": "client_put", "node": "n2", "key": "fetch", "value": "v1" },
+      { "type": "partition", "a": "n0", "b": "n1" },
+      { "type": "tick", "duration": "10ms" },
+      { "type": "heal", "a": "n0", "b": "n1" },
+      { "type": "tick", "duration": "10ms" }
+    ],
+    "invariants": [
+      { "type": "kv_present_on_all", "key": "fetch" },
+      { "type": "kv_all_equal", "key": "fetch" }
+    ]
+  }
+}

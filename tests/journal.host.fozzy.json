@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "name": "journal-host",
+  "steps": [
+    { "type": "fs_write", "path": "tmp/journal/host.txt", "data": "journal-host" },
+    { "type": "fs_read_assert", "path": "tmp/journal/host.txt", "equals": "journal-host" },
+    {
+      "type": "proc_when",
+      "cmd": "echo",
+      "args": ["journal-host"],
+      "exit_code": 0,
+      "stdout": "journal-host\n"
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "echo",
+      "args": ["journal-host"],
+      "expect_exit": 0,
+      "expect_stdout": "journal-host\n"
+    }
+  ]
+}

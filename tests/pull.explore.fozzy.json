@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "name": "pull-explore",
+  "distributed": {
+    "node_count": 3,
+    "steps": [
+      { "type": "client_put", "node": "n0", "key": "pull", "value": "v1" },
+      { "type": "client_put", "node": "n1", "key": "pull", "value": "v1" },
+      { "type": "client_put", "node": "n2", "key": "pull", "value": "v1" },
+      { "type": "crash", "node": "n1" },
+      { "type": "tick", "duration": "10ms" },
+      { "type": "restart", "node": "n1" },
+      { "type": "tick", "duration": "10ms" }
+    ],
+    "invariants": [
+      { "type": "kv_present_on_all", "key": "pull" },
+      { "type": "kv_all_equal", "key": "pull" }
+    ]
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "name": "log-host",
+  "steps": [
+    { "type": "fs_write", "path": "tmp/log/host.txt", "data": "log-host" },
+    { "type": "fs_read_assert", "path": "tmp/log/host.txt", "equals": "log-host" },
+    {
+      "type": "proc_when",
+      "cmd": "echo",
+      "args": ["log-host"],
+      "exit_code": 0,
+      "stdout": "log-host\n"
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "echo",
+      "args": ["log-host"],
+      "expect_exit": 0,
+      "expect_stdout": "log-host\n"
+    }
+  ]
+}

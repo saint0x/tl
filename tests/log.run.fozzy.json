@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "log-run",
+  "steps": [
+    { "type": "trace_event", "name": "log-run" },
+    { "type": "fs_write", "path": "tmp/log/run.txt", "data": "log-run" },
+    { "type": "fs_read_assert", "path": "tmp/log/run.txt", "equals": "log-run" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

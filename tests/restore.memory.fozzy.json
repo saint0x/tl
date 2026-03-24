@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "restore-memory",
+  "steps": [
+    { "type": "memory_alloc", "bytes": 144, "key": "restore_buf", "tag": "restore" },
+    { "type": "memory_assert_in_use_bytes", "equals": 144 },
+    { "type": "memory_free", "key": "restore_buf" },
+    { "type": "memory_assert_in_use_bytes", "equals": 0 }
+  ]
+}

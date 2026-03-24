@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "name": "daemon-host",
+  "steps": [
+    { "type": "fs_write", "path": "tmp/daemon/host.txt", "data": "daemon-host" },
+    { "type": "fs_read_assert", "path": "tmp/daemon/host.txt", "equals": "daemon-host" },
+    {
+      "type": "proc_when",
+      "cmd": "echo",
+      "args": ["daemon-host"],
+      "exit_code": 0,
+      "stdout": "daemon-host\n"
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "echo",
+      "args": ["daemon-host"],
+      "expect_exit": 0,
+      "expect_stdout": "daemon-host\n"
+    }
+  ]
+}

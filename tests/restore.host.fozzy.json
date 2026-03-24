@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "name": "restore-host",
+  "steps": [
+    { "type": "fs_write", "path": "tmp/restore/host.txt", "data": "restore-host" },
+    { "type": "fs_read_assert", "path": "tmp/restore/host.txt", "equals": "restore-host" },
+    {
+      "type": "proc_when",
+      "cmd": "echo",
+      "args": ["restore-host"],
+      "exit_code": 0,
+      "stdout": "restore-host\n"
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "echo",
+      "args": ["restore-host"],
+      "expect_exit": 0,
+      "expect_stdout": "restore-host\n"
+    }
+  ]
+}

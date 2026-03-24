@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "restore-run",
+  "steps": [
+    { "type": "trace_event", "name": "restore-run" },
+    { "type": "fs_write", "path": "tmp/restore/run.txt", "data": "restore-run" },
+    { "type": "fs_read_assert", "path": "tmp/restore/run.txt", "equals": "restore-run" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

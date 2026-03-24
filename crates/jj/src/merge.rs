@@ -57,7 +57,7 @@ pub struct MergeState {
     pub ours_commit: String,
     /// "Theirs" commit ID (target branch)
     pub theirs_commit: String,
-    /// Target branch name (e.g., "tl/main")
+    /// Target branch name (e.g., "main")
     pub theirs_branch: String,
     /// Base commit ID (common ancestor)
     pub base_commit: Option<String>,
@@ -124,15 +124,8 @@ pub fn get_branch_commit_id(workspace: &Workspace, branch_name: &str) -> Result<
 
     let view = repo.view();
 
-    // Ensure tl/ prefix
-    let full_name = if branch_name.starts_with("tl/") {
-        branch_name.to_string()
-    } else {
-        format!("tl/{}", branch_name)
-    };
-
     // Get local bookmark target (branches are now called bookmarks)
-    let ref_name: &RefName = full_name.as_ref();
+    let ref_name: &RefName = branch_name.as_ref();
     let target = view.get_local_bookmark(ref_name);
 
     match target.as_normal() {
@@ -144,7 +137,7 @@ pub fn get_branch_commit_id(workspace: &Workspace, branch_name: &str) -> Result<
             let remote_ref = view.get_remote_bookmark(remote_symbol);
             match remote_ref.target.as_normal() {
                 Some(commit_id) => Ok(commit_id.hex()),
-                None => Err(anyhow!("Branch '{}' not found or has no commit", full_name)),
+                None => Err(anyhow!("Branch '{}' not found or has no commit", branch_name)),
             }
         }
     }
@@ -185,7 +178,7 @@ pub fn find_merge_base(workspace: &Workspace, commit1_hex: &str, commit2_hex: &s
 ///
 /// # Arguments
 /// * `workspace` - JJ workspace
-/// * `target_branch` - Branch to merge (e.g., "tl/main" or "main")
+/// * `target_branch` - Branch to merge (e.g., "main")
 ///
 /// # Returns
 /// MergeResult with merged tree and conflict information
@@ -201,13 +194,7 @@ pub fn perform_merge(workspace: &Workspace, target_branch: &str) -> Result<Merge
 
     // 2. Get target branch commit ("theirs")
     let theirs_id = {
-        let full_name = if target_branch.starts_with("tl/") {
-            target_branch.to_string()
-        } else {
-            format!("tl/{}", target_branch)
-        };
-
-        let ref_name: &RefName = full_name.as_ref();
+        let ref_name: &RefName = target_branch.as_ref();
         let target = view.get_local_bookmark(ref_name);
         match target.as_normal() {
             Some(id) => id.clone(),
@@ -217,7 +204,7 @@ pub fn perform_merge(workspace: &Workspace, target_branch: &str) -> Result<Merge
                 let remote_symbol = ref_name.to_remote_symbol(origin_remote);
                 let remote_ref = view.get_remote_bookmark(remote_symbol);
                 remote_ref.target.as_normal()
-                    .ok_or_else(|| anyhow!("Branch '{}' not found", full_name))?
+                    .ok_or_else(|| anyhow!("Branch '{}' not found", target_branch))?
                     .clone()
             }
         }
@@ -358,7 +345,7 @@ mod tests {
             in_progress: true,
             ours_commit: "abc123".to_string(),
             theirs_commit: "def456".to_string(),
-            theirs_branch: "tl/main".to_string(),
+            theirs_branch: "main".to_string(),
             base_commit: Some("789abc".to_string()),
             conflicts: vec!["src/main.rs".to_string()],
             pre_merge_checkpoint: "01KE77BC".to_string(),

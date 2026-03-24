@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "name": "restore-rewind-host",
+  "steps": [
+    { "type": "fs_write", "path": "tmp/restore_rewind/host.txt", "data": "restore-rewind-host" },
+    { "type": "fs_read_assert", "path": "tmp/restore_rewind/host.txt", "equals": "restore-rewind-host" },
+    {
+      "type": "proc_when",
+      "cmd": "echo",
+      "args": ["restore-rewind-host"],
+      "exit_code": 0,
+      "stdout": "restore-rewind-host\n"
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "echo",
+      "args": ["restore-rewind-host"],
+      "expect_exit": 0,
+      "expect_stdout": "restore-rewind-host\n"
+    }
+  ]
+}

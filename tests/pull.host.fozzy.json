@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "name": "pull-host",
+  "steps": [
+    { "type": "fs_write", "path": "tmp/pull/host.txt", "data": "pull-host" },
+    { "type": "fs_read_assert", "path": "tmp/pull/host.txt", "equals": "pull-host" },
+    {
+      "type": "proc_when",
+      "cmd": "echo",
+      "args": ["pull-host"],
+      "exit_code": 0,
+      "stdout": "pull-host\n"
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "echo",
+      "args": ["pull-host"],
+      "expect_exit": 0,
+      "expect_stdout": "pull-host\n"
+    }
+  ]
+}

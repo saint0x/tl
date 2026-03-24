@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "pull-run",
+  "steps": [
+    { "type": "trace_event", "name": "pull-start" },
+    { "type": "fs_write", "path": "tmp/pull/run.txt", "data": "pull-run" },
+    { "type": "fs_read_assert", "path": "tmp/pull/run.txt", "equals": "pull-run" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

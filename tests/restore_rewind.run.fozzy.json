@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "restore-rewind-run",
+  "steps": [
+    { "type": "trace_event", "name": "restore-rewind-run" },
+    { "type": "fs_write", "path": "tmp/restore_rewind/run.txt", "data": "restore-rewind-run" },
+    { "type": "fs_read_assert", "path": "tmp/restore_rewind/run.txt", "equals": "restore-rewind-run" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

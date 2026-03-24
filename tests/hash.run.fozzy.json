@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "hash-run",
+  "steps": [
+    { "type": "trace_event", "name": "hash-run" },
+    { "type": "fs_write", "path": "tmp/hash/run.txt", "data": "hash-run" },
+    { "type": "fs_read_assert", "path": "tmp/hash/run.txt", "equals": "hash-run" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

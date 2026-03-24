@@ -3,7 +3,7 @@
 //! Merges changes from a branch into the current working state.
 //!
 //! Usage:
-//!   tl merge tl/main        # Merge branch into current state
+//!   tl merge main           # Merge branch into current state
 //!   tl merge --abort          # Abort in-progress merge
 //!   tl merge --continue       # Complete merge after resolving conflicts
 

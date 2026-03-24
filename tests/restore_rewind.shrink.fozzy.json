@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "name": "restore-rewind-shrink",
+  "steps": [
+    { "type": "trace_event", "name": "restore-rewind-shrink" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ],
+  "notes": {
+    "minimize": "all"
+  }
+}

@@ -43,8 +43,6 @@ use jj_lib::repo::Repo;            // For Repo trait methods
 use jj_lib::settings::UserSettings;
 use std::path::{Path, PathBuf};
 
-pub const DEFAULT_TIMELAPSE_BOOKMARK: &str = "tl/main";
-
 /// Errors specific to JJ integration
 #[derive(Debug, thiserror::Error)]
 pub enum JjError {

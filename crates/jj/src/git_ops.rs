@@ -93,11 +93,8 @@ pub fn native_git_push(
     let origin_remote: &RemoteName = "origin".as_ref();
 
     if all {
-        // Collect all Timelapse bookmarks (`tl/*`) only.
+        // Collect all local bookmarks so Timelapse tracks the real Git branch set.
         for (bookmark_name, target) in view.local_bookmarks() {
-            if !bookmark_name.as_str().starts_with("tl/") {
-                continue;
-            }
             if let Some(local_commit_id) = target.as_normal() {
                 // Create remote symbol for lookup
                 let remote_symbol = bookmark_name.to_remote_symbol(origin_remote);
@@ -130,23 +127,7 @@ pub fn native_git_push(
             anyhow::bail!("Branch {} not found or not at a single commit", full_name);
         }
     } else {
-        let ref_name: &RefName = crate::DEFAULT_TIMELAPSE_BOOKMARK.as_ref();
-        let target = view.get_local_bookmark(ref_name);
-        if let Some(local_commit_id) = target.as_normal() {
-            let remote_symbol = ref_name.to_remote_symbol(origin_remote);
-            let remote_ref = view.get_remote_bookmark(remote_symbol);
-            let remote_commit_id = remote_ref.target.as_normal().map(|id| id.hex());
-            branches_to_push.push((
-                crate::DEFAULT_TIMELAPSE_BOOKMARK.to_string(),
-                Some(local_commit_id.hex()),
-                remote_commit_id,
-            ));
-        } else {
-            anyhow::bail!(
-                "Default Timelapse bookmark '{}' not found. Run 'tl publish HEAD' first or specify -b <name>",
-                crate::DEFAULT_TIMELAPSE_BOOKMARK
-            );
-        }
+        anyhow::bail!("No branch specified to push");
     }
 
     if branches_to_push.is_empty() {
@@ -392,10 +373,10 @@ pub fn native_git_fetch_filtered(workspace: &mut Workspace, bookmark_expr: Strin
 ///
 /// This is critical for performance on large remotes: enumerating local
 /// bookmarks into a giant union of refspecs can dominate runtime.
-pub fn native_git_fetch_for_pull(workspace: &mut Workspace) -> Result<()> {
+pub fn native_git_fetch_for_pull(workspace: &mut Workspace, branch_name: &str) -> Result<()> {
     native_git_fetch_filtered(
         workspace,
-        StringExpression::exact(crate::DEFAULT_TIMELAPSE_BOOKMARK.to_string()),
+        StringExpression::exact(branch_name.to_string()),
     )
 }
 
@@ -552,7 +533,7 @@ fn calculate_ahead_behind(
 /// Information about a remote branch
 #[derive(Debug, Clone)]
 pub struct RemoteBranchInfo {
-    /// Branch name (e.g., "tl/main")
+    /// Branch name (e.g., "main")
     pub name: String,
     /// Remote commit ID (hex)
     pub remote_commit_id: Option<String>,
@@ -625,7 +606,7 @@ pub fn get_remote_branch_updates(workspace: &jj_lib::workspace::Workspace) -> Re
 /// Information about a local branch
 #[derive(Debug, Clone)]
 pub struct LocalBranchInfo {
-    /// Branch name (e.g., "tl/main")
+    /// Branch name (e.g., "main")
     pub name: String,
     /// Commit ID (hex)
     pub commit_id: String,
@@ -825,13 +806,13 @@ mod tests {
     #[test]
     fn test_branch_push_result_construction() {
         let result = BranchPushResult {
-            name: "tl/main".to_string(),
+            name: "main".to_string(),
             status: BranchPushStatus::Pushed,
             old_commit: Some("abc123".to_string()),
             new_commit: Some("def456".to_string()),
         };
 
-        assert_eq!(result.name, "tl/main");
+        assert_eq!(result.name, "main");
         assert_eq!(result.status, BranchPushStatus::Pushed);
     }
 }

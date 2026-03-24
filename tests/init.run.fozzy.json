@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "init-run",
+  "steps": [
+    { "type": "trace_event", "name": "init-run" },
+    { "type": "fs_write", "path": "tmp/init/run.txt", "data": "init-run" },
+    { "type": "fs_read_assert", "path": "tmp/init/run.txt", "equals": "init-run" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

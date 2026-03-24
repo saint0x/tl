@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "daemon-run",
+  "steps": [
+    { "type": "trace_event", "name": "daemon-start" },
+    { "type": "sleep", "duration": "10ms" },
+    { "type": "trace_event", "name": "daemon-flush" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

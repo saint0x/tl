@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "fetch-run",
+  "steps": [
+    { "type": "trace_event", "name": "fetch-start" },
+    { "type": "fs_write", "path": "tmp/fetch/run.txt", "data": "fetch-run" },
+    { "type": "fs_read_assert", "path": "tmp/fetch/run.txt", "equals": "fetch-run" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

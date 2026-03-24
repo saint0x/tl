@@ -67,7 +67,7 @@ pub async fn run(no_sync: bool, prune: bool) -> Result<()> {
             println!("  {} {} ({})", branch.name.cyan(), remote_id.dimmed(), status);
         }
     } else {
-        println!("{}", "No Timelapse remote bookmarks found".dimmed());
+        println!("{}", "No remote branches found".dimmed());
     }
 
     // 6. Handle prune flag
@@ -97,14 +97,15 @@ async fn sync_working_directory(
     branches: &[jj::RemoteBranchInfo],
 ) -> Result<()> {
     // Find branches that have updates (remote differs from local)
-    let sync_branch = match branches.iter().find(|b| b.name == jj::DEFAULT_TIMELAPSE_BOOKMARK) {
+    let (_remote_name, branch_name) = util::resolve_git_sync_target(repo_root)?;
+    let sync_branch = match branches.iter().find(|b| b.name == branch_name) {
         Some(branch) => branch,
         None => {
             println!(
                 "{}",
                 format!(
-                    "Remote bookmark '{}' is not present; skipping working directory sync.",
-                    jj::DEFAULT_TIMELAPSE_BOOKMARK
+                    "Remote branch '{}' is not present; skipping working directory sync.",
+                    branch_name
                 ).dimmed()
             );
             return Ok(());

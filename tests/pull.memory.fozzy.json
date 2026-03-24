@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "pull-memory",
+  "steps": [
+    { "type": "memory_alloc", "bytes": 128, "key": "pull_buf", "tag": "pull" },
+    { "type": "memory_assert_in_use_bytes", "equals": 128 },
+    { "type": "memory_free", "key": "pull_buf" },
+    { "type": "memory_assert_in_use_bytes", "equals": 0 }
+  ]
+}

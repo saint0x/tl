@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "journal-run",
+  "steps": [
+    { "type": "trace_event", "name": "journal-run" },
+    { "type": "fs_write", "path": "tmp/journal/run.txt", "data": "journal-run" },
+    { "type": "fs_read_assert", "path": "tmp/journal/run.txt", "equals": "journal-run" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

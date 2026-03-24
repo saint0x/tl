@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "name": "restore-explore",
+  "distributed": {
+    "node_count": 3,
+    "steps": [
+      { "type": "client_put", "node": "n0", "key": "restore", "value": "v1" },
+      { "type": "client_put", "node": "n1", "key": "restore", "value": "v1" },
+      { "type": "client_put", "node": "n2", "key": "restore", "value": "v1" },
+      { "type": "partition", "a": "n1", "b": "n2" },
+      { "type": "tick", "duration": "10ms" },
+      { "type": "heal", "a": "n1", "b": "n2" },
+      { "type": "tick", "duration": "10ms" }
+    ],
+    "invariants": [
+      { "type": "kv_present_on_all", "key": "restore" },
+      { "type": "kv_all_equal", "key": "restore" }
+    ]
+  }
+}

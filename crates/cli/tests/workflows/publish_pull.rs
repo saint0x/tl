@@ -115,10 +115,10 @@ async fn test_publish_single_checkpoint() -> Result<()> {
         "Should confirm publication"
     );
 
-    // Verify auto-bookmark tl/main is created when no explicit bookmark provided
+    // Verify the current Git branch is used when no explicit bookmark is provided
     assert!(
-        publish_result.stdout.contains("tl/main") || publish_result.stdout.contains("Updated bookmark"),
-        "Should auto-create tl/main bookmark"
+        publish_result.stdout.contains("main") || publish_result.stdout.contains("Updated bookmark"),
+        "Should auto-create the current Git branch bookmark"
     );
 
     // Performance assertion
@@ -161,10 +161,10 @@ async fn test_publish_head_alias() -> Result<()> {
         "Should confirm publication using HEAD"
     );
 
-    // Verify auto-bookmark tl/main is created
+    // Verify the current Git branch is used by default
     assert!(
-        publish_result.stdout.contains("tl/main"),
-        "Should auto-create tl/main bookmark when publishing HEAD"
+        publish_result.stdout.contains("main"),
+        "Should auto-create the current Git branch bookmark when publishing HEAD"
     );
 
     Ok(())

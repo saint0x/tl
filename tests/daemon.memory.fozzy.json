@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "daemon-memory",
+  "steps": [
+    { "type": "memory_alloc", "bytes": 192, "key": "daemon_buf", "tag": "daemon" },
+    { "type": "memory_assert_in_use_bytes", "equals": 192 },
+    { "type": "memory_free", "key": "daemon_buf" },
+    { "type": "memory_assert_in_use_bytes", "equals": 0 }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "name": "remote-host",
+  "steps": [
+    { "type": "fs_write", "path": "tmp/remote/host.txt", "data": "remote-host" },
+    { "type": "fs_read_assert", "path": "tmp/remote/host.txt", "equals": "remote-host" },
+    {
+      "type": "proc_when",
+      "cmd": "echo",
+      "args": ["remote-host"],
+      "exit_code": 0,
+      "stdout": "remote-host\n"
+    },
+    {
+      "type": "proc_spawn",
+      "cmd": "echo",
+      "args": ["remote-host"],
+      "expect_exit": 0,
+      "expect_stdout": "remote-host\n"
+    }
+  ]
+}

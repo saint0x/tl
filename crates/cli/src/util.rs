@@ -54,6 +54,104 @@ pub fn git_fetch_origin(repo_root: &Path, prune: bool) -> Result<()> {
     anyhow::bail!("git fetch failed: {}", stderr.trim());
 }
 
+/// Return the current local Git branch name, or None if HEAD is detached.
+pub fn git_current_branch(repo_root: &Path) -> Result<Option<String>> {
+    let out = Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(repo_root)
+        .output()
+        .context("Failed to run git branch --show-current")?;
+
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        anyhow::bail!("Failed to determine current git branch: {}", stderr.trim());
+    }
+
+    let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if branch.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(branch))
+    }
+}
+
+/// Return the configured upstream as (remote, branch), or None if no upstream exists.
+pub fn git_upstream_branch(repo_root: &Path) -> Result<Option<(String, String)>> {
+    let out = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
+        .current_dir(repo_root)
+        .output()
+        .context("Failed to run git rev-parse @{upstream}")?;
+
+    if !out.status.success() {
+        return Ok(None);
+    }
+
+    let upstream = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if upstream.is_empty() {
+        return Ok(None);
+    }
+
+    let Some((remote, branch)) = upstream.split_once('/') else {
+        anyhow::bail!("Unexpected upstream ref format: {}", upstream);
+    };
+
+    Ok(Some((remote.to_string(), branch.to_string())))
+}
+
+/// Return the default branch for a remote if origin/HEAD is configured.
+pub fn git_remote_default_branch(repo_root: &Path, remote: &str) -> Result<Option<String>> {
+    let ref_name = format!("refs/remotes/{}/HEAD", remote);
+    let out = Command::new("git")
+        .args(["symbolic-ref", "--quiet", &ref_name])
+        .current_dir(repo_root)
+        .output()
+        .context("Failed to run git symbolic-ref for remote HEAD")?;
+
+    if !out.status.success() {
+        return Ok(None);
+    }
+
+    let symbolic_ref = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let prefix = format!("refs/remotes/{remote}/");
+    let branch = symbolic_ref.strip_prefix(&prefix).unwrap_or(&symbolic_ref).to_string();
+    if branch.is_empty() || branch == "HEAD" {
+        Ok(None)
+    } else {
+        Ok(Some(branch))
+    }
+}
+
+/// Resolve the canonical Git sync target as (remote, branch).
+///
+/// Resolution order:
+/// 1. Current branch upstream, if configured
+/// 2. Current local branch on origin
+/// 3. origin/HEAD default branch
+pub fn resolve_git_sync_target(repo_root: &Path) -> Result<(String, String)> {
+    if let Some((remote, branch)) = git_upstream_branch(repo_root)? {
+        return Ok((remote, branch));
+    }
+
+    if let Some(branch) = git_current_branch(repo_root)? {
+        return Ok(("origin".to_string(), branch));
+    }
+
+    if let Some(branch) = git_remote_default_branch(repo_root, "origin")? {
+        return Ok(("origin".to_string(), branch));
+    }
+
+    anyhow::bail!(
+        "Could not determine a Git branch to sync. Check out a branch or configure an upstream."
+    );
+}
+
+/// Resolve the canonical local bookmark/branch name for publishing.
+pub fn resolve_publish_branch(repo_root: &Path) -> Result<String> {
+    let (_remote, branch) = resolve_git_sync_target(repo_root)?;
+    Ok(branch)
+}
+
 /// Resolve checkpoint reference to ULID
 /// Supports:
 /// - Full ULID: "01HN8XYZ..."

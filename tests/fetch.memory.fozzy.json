@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "fetch-memory",
+  "steps": [
+    { "type": "memory_alloc", "bytes": 96, "key": "fetch_buf", "tag": "fetch" },
+    { "type": "memory_assert_in_use_bytes", "equals": 96 },
+    { "type": "memory_free", "key": "fetch_buf" },
+    { "type": "memory_assert_in_use_bytes", "equals": 0 }
+  ]
+}

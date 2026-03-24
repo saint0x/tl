@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "journal-memory",
+  "steps": [
+    { "type": "memory_alloc", "bytes": 160, "key": "journal_buf", "tag": "journal" },
+    { "type": "memory_assert_in_use_bytes", "equals": 160 },
+    { "type": "memory_free", "key": "journal_buf" },
+    { "type": "memory_assert_in_use_bytes", "equals": 0 }
+  ]
+}

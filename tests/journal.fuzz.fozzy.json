@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "journal-fuzz",
+  "steps": [
+    { "type": "trace_event", "name": "journal-fuzz" },
+    { "type": "rand_u64", "key": "value" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

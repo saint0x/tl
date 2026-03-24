@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "data-access-run",
+  "steps": [
+    { "type": "trace_event", "name": "data-access-run" },
+    { "type": "fs_write", "path": "tmp/data_access/run.txt", "data": "data-access-run" },
+    { "type": "fs_read_assert", "path": "tmp/data_access/run.txt", "equals": "data-access-run" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

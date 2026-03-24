@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "hash-memory",
+  "steps": [
+    { "type": "memory_alloc", "bytes": 176, "key": "hash_buf", "tag": "hash" },
+    { "type": "memory_assert_in_use_bytes", "equals": 176 },
+    { "type": "memory_free", "key": "hash_buf" },
+    { "type": "memory_assert_in_use_bytes", "equals": 0 }
+  ]
+}

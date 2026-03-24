@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "ipc-run",
+  "steps": [
+    { "type": "trace_event", "name": "ipc-run" },
+    { "type": "fs_write", "path": "tmp/ipc/run.txt", "data": "ipc-run" },
+    { "type": "fs_read_assert", "path": "tmp/ipc/run.txt", "equals": "ipc-run" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ]
+}

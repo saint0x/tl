@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "name": "ipc-shrink",
+  "steps": [
+    { "type": "trace_event", "name": "ipc-shrink" },
+    { "type": "assert_eq_int", "a": 1, "b": 1 }
+  ],
+  "notes": {
+    "minimize": "all"
+  }
+}

@@ -43,11 +43,13 @@ pub async fn run(
     }
 
     // 3. Fetch from remote using latency-optimized refspec selection
-    println!("{}", "Fetching from Git remote...".dimmed());
+    let (remote_name, branch_name) = util::resolve_git_sync_target(&repo_root)?;
+
+    println!("{}", format!("Fetching {} from {}...", branch_name, remote_name).dimmed());
     let mut workspace = jj::load_workspace(&repo_root)
         .context("Failed to load JJ workspace")?;
 
-    jj::git_ops::native_git_fetch_for_pull(&mut workspace)?;
+    jj::git_ops::native_git_fetch_for_pull(&mut workspace, &branch_name)?;
     println!("{} Fetched from remote", "✓".green());
 
     // From here on we need the daemon (checkpoint import, flush-based auto-stash, etc.).
@@ -61,18 +63,19 @@ pub async fn run(
     // 5. Check for uncommitted changes and auto-stash
     let stash_entry = check_and_auto_stash(&tl_dir, &stash_manager).await?;
 
-    // 6. Sync exclusively against the production Timelapse branch.
+    // 6. Sync against the canonical Git remote branch for this checkout.
     let remote_commit_id = match jj::git_ops::get_remote_bookmark_head(
         &workspace,
-        jj::DEFAULT_TIMELAPSE_BOOKMARK,
+        &branch_name,
     )? {
         Some(v) => v,
         None => {
             println!(
                 "{}",
                 format!(
-                    "Remote bookmark '{}' was not found.",
-                    jj::DEFAULT_TIMELAPSE_BOOKMARK
+                    "Remote branch '{}/{}' was not found.",
+                    remote_name,
+                    branch_name
                 ).dimmed()
             );
             if let Some(stash) = stash_entry {
