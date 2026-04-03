@@ -8,19 +8,16 @@
 //! 5. Sync working directory to remote HEAD
 //! 6. Re-apply stash (if any)
 
-use anyhow::{Context, Result};
-use crate::util;
 use crate::cmd::restore::restore_tree;
-use journal::{Checkpoint, StashEntry, StashManager};
+use crate::util;
+use anyhow::{Context, Result};
+use journal::{Checkpoint, CheckpointMeta, CheckpointReason, Journal, PinManager, StashEntry, StashManager};
 use owo_colors::OwoColorize;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tl_core::Store;
 
-pub async fn run(
-    fetch_only: bool,
-    no_pin: bool,
-) -> Result<()> {
+pub async fn run(fetch_only: bool, no_pin: bool) -> Result<()> {
     // 1. Find repository root
     let repo_root = util::find_repo_root()?;
     let tl_dir = repo_root.join(".tl");
@@ -33,7 +30,11 @@ pub async fn run(
         util::git_fetch_origin(&repo_root, false)?;
         println!("{} Fetched from remote", "✓".green());
         println!();
-        println!("{}", "Fetch complete. Use 'tl pull' (without --fetch-only) to sync working directory.".dimmed());
+        println!(
+            "{}",
+            "Fetch complete. Use 'tl pull' (without --fetch-only) to sync working directory."
+                .dimmed()
+        );
         return Ok(());
     }
 
@@ -45,48 +46,69 @@ pub async fn run(
     // 3. Fetch from remote using latency-optimized refspec selection
     let (remote_name, branch_name) = util::resolve_git_sync_target(&repo_root)?;
 
-    println!("{}", format!("Fetching {} from {}...", branch_name, remote_name).dimmed());
-    let mut workspace = jj::load_workspace(&repo_root)
-        .context("Failed to load JJ workspace")?;
-
-    jj::git_ops::native_git_fetch_for_pull(&mut workspace, &branch_name)?;
+    println!(
+        "{}",
+        format!("Fetching {} from {}...", branch_name, remote_name).dimmed()
+    );
+    util::git_fetch_branch(&repo_root, &remote_name, &branch_name, false)?;
     println!("{} Fetched from remote", "✓".green());
 
-    // From here on we need the daemon (checkpoint import, flush-based auto-stash, etc.).
-    crate::daemon::ensure_daemon_running().await?;
-
-    // 4. Open components
-    let store = Store::open(&repo_root)
-        .context("Failed to open Timelapse store")?;
-    let stash_manager = StashManager::new(&tl_dir);
-
-    // 5. Check for uncommitted changes and auto-stash
-    let stash_entry = check_and_auto_stash(&tl_dir, &stash_manager).await?;
-
-    // 6. Sync against the canonical Git remote branch for this checkout.
-    let remote_commit_id = match jj::git_ops::get_remote_bookmark_head(
-        &workspace,
-        &branch_name,
+    let local_commit_id = util::git_resolve_ref(&repo_root, &format!("refs/heads/{branch_name}"))?;
+    let remote_commit_id = match util::git_resolve_ref(
+        &repo_root,
+        &format!("refs/remotes/{remote_name}/{branch_name}"),
     )? {
         Some(v) => v,
         None => {
             println!(
                 "{}",
-                format!(
-                    "Remote branch '{}/{}' was not found.",
-                    remote_name,
-                    branch_name
-                ).dimmed()
+                format!("Remote branch '{}/{}' was not found.", remote_name, branch_name)
+                    .dimmed()
             );
-            if let Some(stash) = stash_entry {
-                reapply_stash(&repo_root, &tl_dir, &store, &stash_manager, stash).await?;
-            }
             return Ok(());
         }
     };
 
+    if local_commit_id.as_deref() == Some(remote_commit_id.as_str()) {
+        let short_id = &remote_commit_id[..12.min(remote_commit_id.len())];
+        println!(
+            "{} Already up to date at {}",
+            "✓".green(),
+            short_id.bright_cyan()
+        );
+        println!();
+        println!("{}", "Pull complete.".dimmed());
+        return Ok(());
+    }
+
+    let daemon_running = crate::daemon::is_running().await;
+    let has_local_changes = util::git_has_working_tree_changes(&repo_root)?;
+    let use_daemon = daemon_running || has_local_changes;
+
+    // When the daemon is already running, or we need its watcher-backed auto-stash
+    // for local changes, use the daemon-owned journal path. Otherwise do the import
+    // directly in-process to avoid paying daemon cold-start latency for one-shot pull.
+    if use_daemon && !daemon_running {
+        crate::daemon::ensure_daemon_running().await?;
+    }
+
+    // 4. Open components
+    let store = Store::open(&repo_root).context("Failed to open Timelapse store")?;
+    let stash_manager = StashManager::new(&tl_dir);
+
+    // 5. Check for uncommitted changes and auto-stash
+    let stash_entry = if use_daemon {
+        check_and_auto_stash(&tl_dir, &stash_manager).await?
+    } else {
+        None
+    };
+
     // 7. Import remote commit as checkpoint via the daemon (journal is daemon-owned).
-    let imported = import_remote_commit_via_daemon(&tl_dir, &remote_commit_id, no_pin).await?;
+    let imported = if use_daemon {
+        import_remote_commit_via_daemon(&tl_dir, &remote_commit_id, no_pin).await?
+    } else {
+        import_remote_commit_direct(&repo_root, &tl_dir, &remote_commit_id, no_pin)?
+    };
 
     if imported.already_present {
         let short_id = &imported.checkpoint.id.to_string()[..8];
@@ -122,7 +144,11 @@ pub async fn run(
             result.files_restored.to_string().green()
         );
         if !result.errors.is_empty() {
-            println!("{} {} errors during sync", "!".yellow(), result.errors.len());
+            println!(
+                "{} {} errors during sync",
+                "!".yellow(),
+                result.errors.len()
+            );
             for err in result.errors.iter().take(3) {
                 println!("  {}", err.dimmed());
             }
@@ -130,11 +156,13 @@ pub async fn run(
 
         // CRITICAL (Fix 12): Invalidate pathmap after modifying working directory
         // The daemon's in-memory pathmap is now stale and needs to be rebuilt
-        let socket_path = tl_dir.join("state/daemon.sock");
-        if socket_path.exists() {
-            if let Ok(mut client) = crate::ipc::IpcClient::connect(&socket_path).await {
-                if let Err(e) = client.invalidate_pathmap().await {
-                    tracing::warn!("Failed to invalidate pathmap after pull: {}", e);
+        if use_daemon {
+            let socket_path = crate::util::daemon_socket_path(&repo_root)?;
+            if socket_path.exists() {
+                if let Ok(mut client) = crate::ipc::IpcClient::connect(&socket_path).await {
+                    if let Err(e) = client.invalidate_pathmap().await {
+                        tracing::warn!("Failed to invalidate pathmap after pull: {}", e);
+                    }
                 }
             }
         }
@@ -161,7 +189,10 @@ async fn check_and_auto_stash(
     tl_dir: &Path,
     stash_manager: &StashManager,
 ) -> Result<Option<StashEntry>> {
-    let socket_path = tl_dir.join("state/daemon.sock");
+    let repo_root = tl_dir
+        .parent()
+        .context("Invalid Timelapse directory: missing repo root")?;
+    let socket_path = crate::util::daemon_socket_path(repo_root)?;
     let resilient = crate::ipc::ResilientIpcClient::new(socket_path);
 
     let base = match resilient
@@ -185,9 +216,7 @@ async fn check_and_auto_stash(
                 let checkpoint_id = ulid::Ulid::from_string(&id_str)?;
 
                 println!("{}", "Auto-stashing uncommitted changes...".dimmed());
-                let now_ms = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)?
-                    .as_millis() as u64;
+                let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
 
                 let entry = StashEntry {
                     checkpoint_id,
@@ -224,12 +253,65 @@ struct ImportResult {
     already_present: bool,
 }
 
+fn import_remote_commit_direct(
+    repo_root: &Path,
+    tl_dir: &Path,
+    commit_id: &str,
+    no_pin: bool,
+) -> Result<ImportResult> {
+    let mapping = jj::JjMapping::open(tl_dir)?;
+    if let Some(existing_id) = mapping.get_checkpoint(commit_id)? {
+        let journal = Journal::open(&tl_dir.join("journal"))?;
+        if let Some(checkpoint) = journal.get(&existing_id)? {
+            return Ok(ImportResult {
+                checkpoint,
+                already_present: true,
+            });
+        }
+    }
+
+    let store = Store::open(repo_root).context("Failed to open Timelapse store")?;
+    let journal = Journal::open(&tl_dir.join("journal")).context("Failed to open journal")?;
+    let workspace = jj::load_workspace(repo_root).context("Failed to load JJ workspace")?;
+    let (root_tree, files_changed) = jj::git_ops::export_commit_to_tl_store(&workspace, commit_id, &store)?;
+
+    let checkpoint = Checkpoint::new(
+        journal.latest()?.map(|cp| cp.id),
+        root_tree,
+        CheckpointReason::Publish,
+        vec![],
+        CheckpointMeta {
+            files_changed,
+            bytes_added: 0,
+            bytes_removed: 0,
+        },
+    );
+    journal.append(&checkpoint)?;
+
+    mapping.set(checkpoint.id, commit_id)?;
+    mapping.set_reverse(commit_id, checkpoint.id)?;
+    mapping.flush()?;
+
+    if !no_pin {
+        let pin_manager = PinManager::new(tl_dir);
+        pin_manager.pin("pulled", checkpoint.id)?;
+    }
+
+    Ok(ImportResult {
+        checkpoint,
+        already_present: false,
+    })
+}
+
 async fn import_remote_commit_via_daemon(
     tl_dir: &Path,
     commit_id: &str,
     no_pin: bool,
 ) -> Result<ImportResult> {
-    let socket_path = tl_dir.join("state/daemon.sock");
+    let repo_root = tl_dir
+        .parent()
+        .context("Invalid Timelapse directory: missing repo root")?;
+    let socket_path = crate::util::daemon_socket_path(repo_root)?;
     let resilient = crate::ipc::ResilientIpcClient::new(socket_path);
 
     match resilient
@@ -263,11 +345,13 @@ async fn reapply_stash(
     println!("{}", "Re-applying stashed changes...".dimmed());
 
     // Get checkpoints via daemon IPC (journal is daemon-owned).
-    let socket_path = tl_dir.join("state/daemon.sock");
+    let socket_path = crate::util::daemon_socket_path(&repo_root)?;
     let resilient = crate::ipc::ResilientIpcClient::new(socket_path);
 
     let stash_checkpoint = match resilient
-        .send_request_resilient(&crate::ipc::IpcRequest::GetCheckpoint(stash.checkpoint_id.to_string()))
+        .send_request_resilient(&crate::ipc::IpcRequest::GetCheckpoint(
+            stash.checkpoint_id.to_string(),
+        ))
         .await?
     {
         crate::ipc::IpcResponse::Checkpoint(Some(cp)) => cp,
@@ -302,7 +386,10 @@ async fn reapply_stash(
         };
 
         // Skip protected paths
-        if path_str.starts_with(".tl/") || path_str.starts_with(".git/") || path_str.starts_with(".jj/") {
+        if path_str.starts_with(".tl/")
+            || path_str.starts_with(".git/")
+            || path_str.starts_with(".jj/")
+        {
             continue;
         }
 
@@ -338,11 +425,18 @@ async fn reapply_stash(
 
     // Print success messages BEFORE removing stash
     // This ensures if anything fails, the stash is preserved for retry
-    println!("{} Re-applied {} files from stash", "✓".green(), reapplied.to_string().green());
+    println!(
+        "{} Re-applied {} files from stash",
+        "✓".green(),
+        reapplied.to_string().green()
+    );
 
     if !conflicts.is_empty() {
-        println!("{} {} files had both local and remote changes (local wins):",
-            "!".yellow(), conflicts.len());
+        println!(
+            "{} {} files had both local and remote changes (local wins):",
+            "!".yellow(),
+            conflicts.len()
+        );
         for path in conflicts.iter().take(5) {
             println!("  {}", path.dimmed());
         }

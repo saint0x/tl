@@ -2,8 +2,8 @@
 //!
 //! List, create, and delete branches (JJ bookmarks with standard Git naming).
 
-use anyhow::{Context, Result};
 use crate::util;
+use anyhow::{Context, Result};
 use owo_colors::OwoColorize;
 
 /// Run the branch command
@@ -16,17 +16,13 @@ pub async fn run(
     // 1. Find repository root
     let repo_root = util::find_repo_root()?;
 
-    // Ensure daemon is running
-    crate::daemon::ensure_daemon_running().await?;
-
     // 2. Verify JJ workspace exists
     if jj::detect_jj_workspace(&repo_root)?.is_none() {
         anyhow::bail!("No JJ workspace found. Run 'tl init' first.");
     }
 
     // 3. Load workspace
-    let mut workspace = jj::load_workspace(&repo_root)
-        .context("Failed to load JJ workspace")?;
+    let mut workspace = jj::load_workspace(&repo_root).context("Failed to load JJ workspace")?;
 
     // 4. Handle delete operation
     if let Some(branch_name) = delete {
@@ -75,10 +71,7 @@ fn list_branches(
                 "local only".cyan().to_string()
             };
 
-            println!("  {} {} {}",
-                branch.name.cyan(),
-                short_id.dimmed(),
-                status);
+            println!("  {} {} {}", branch.name.cyan(), short_id.dimmed(), status);
         }
         println!();
     }
@@ -92,7 +85,8 @@ fn list_branches(
         let all_remote: Vec<_> = if show_all {
             remote_updates
         } else {
-            remote_branches.into_iter()
+            remote_branches
+                .into_iter()
                 .map(|b| jj::RemoteBranchInfo {
                     name: b.name,
                     remote_commit_id: b.remote_commit_id,
@@ -107,7 +101,9 @@ fn list_branches(
         if !all_remote.is_empty() {
             println!("{}", "Remote branches (origin):".bold());
             for branch in &all_remote {
-                let remote_id = branch.remote_commit_id.as_ref()
+                let remote_id = branch
+                    .remote_commit_id
+                    .as_ref()
                     .map(|s| &s[..12.min(s.len())])
                     .unwrap_or("???");
 
@@ -121,10 +117,7 @@ fn list_branches(
                     "not tracked".yellow().to_string()
                 };
 
-                println!("  {} {} {}",
-                    branch.name.cyan(),
-                    remote_id.dimmed(),
-                    status);
+                println!("  {} {} {}", branch.name.cyan(), remote_id.dimmed(), status);
             }
             println!();
         } else {
@@ -144,7 +137,11 @@ fn delete_branch(workspace: &mut jj_lib::workspace::Workspace, branch_name: &str
 
     println!("{} Deleted branch {}", "✓".green(), branch_name.cyan());
     println!();
-    println!("{}", "Note: Remote branch not affected. Use 'git push origin --delete' to delete remote.".dimmed());
+    println!(
+        "{}",
+        "Note: Remote branch not affected. Use 'git push origin --delete' to delete remote."
+            .dimmed()
+    );
 
     Ok(())
 }
@@ -159,20 +156,29 @@ async fn create_branch(
     let tl_dir = repo_root.join(".tl");
 
     // Resolve checkpoint reference
-    let ids = crate::data_access::resolve_checkpoint_refs(&[checkpoint_ref.to_string()], &tl_dir).await?;
-    let checkpoint_id = ids[0].ok_or_else(||
-        anyhow::anyhow!("Checkpoint '{}' not found", checkpoint_ref))?;
+    let ids =
+        crate::data_access::resolve_checkpoint_refs(&[checkpoint_ref.to_string()], &tl_dir).await?;
+    let checkpoint_id =
+        ids[0].ok_or_else(|| anyhow::anyhow!("Checkpoint '{}' not found", checkpoint_ref))?;
 
     // Get checkpoint's JJ commit ID
     let jj_mapping = jj::JjMapping::open(&tl_dir)?;
     let checkpoint_id_str = checkpoint_id.to_string();
     let checkpoint_short = &checkpoint_id_str[..8];
-    let commit_id_hex = jj_mapping.get_jj_commit(checkpoint_id)?
-        .ok_or_else(|| anyhow::anyhow!("Checkpoint {} not published to JJ. Run 'tl publish {}' first.",
-            checkpoint_short, checkpoint_ref))?;
+    let commit_id_hex = jj_mapping.get_jj_commit(checkpoint_id)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Checkpoint {} not published to JJ. Run 'tl publish {}' first.",
+            checkpoint_short,
+            checkpoint_ref
+        )
+    })?;
 
     let commit_short = &commit_id_hex[..12.min(commit_id_hex.len())];
-    println!("Creating branch {} at {}...", branch_name.cyan(), commit_short.dimmed());
+    println!(
+        "Creating branch {} at {}...",
+        branch_name.cyan(),
+        commit_short.dimmed()
+    );
 
     jj::create_bookmark_native(workspace, branch_name, &commit_id_hex)?;
 

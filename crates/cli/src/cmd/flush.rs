@@ -20,7 +20,7 @@ pub async fn execute(force: bool) -> Result<()> {
 
     // Find repository root
     let repo_root = util::find_repo_root()?;
-    let socket_path = repo_root.join(".tl/state/daemon.sock");
+    let socket_path = crate::util::daemon_socket_path(&repo_root)?;
 
     // Connect to daemon
     let mut client = IpcClient::connect(&socket_path)
@@ -31,11 +31,15 @@ pub async fn execute(force: bool) -> Result<()> {
         // Create proactive checkpoint even with no pending changes
         match client.force_checkpoint().await {
             Ok(checkpoint_id) => {
-                println!("{} Created restore point: {}",
+                println!(
+                    "{} Created restore point: {}",
                     "✓".green(),
                     checkpoint_id.bright_cyan()
                 );
-                println!("{}", "Use 'tl restore' to return to this point if needed.".dimmed());
+                println!(
+                    "{}",
+                    "Use 'tl restore' to return to this point if needed.".dimmed()
+                );
                 Ok(())
             }
             Err(e) => {
@@ -46,7 +50,8 @@ pub async fn execute(force: bool) -> Result<()> {
         // Normal flush - only checkpoint if there are pending changes
         match client.flush_checkpoint().await? {
             Some(checkpoint_id) => {
-                println!("{} Created checkpoint: {}",
+                println!(
+                    "{} Created checkpoint: {}",
                     "✓".green(),
                     checkpoint_id.bright_cyan()
                 );
@@ -54,7 +59,10 @@ pub async fn execute(force: bool) -> Result<()> {
             }
             None => {
                 println!("{}", "No pending changes to checkpoint".dimmed());
-                println!("{}", "Use 'tl flush --force' to create a restore point anyway.".dimmed());
+                println!(
+                    "{}",
+                    "Use 'tl flush --force' to create a restore point anyway.".dimmed()
+                );
                 Ok(())
             }
         }

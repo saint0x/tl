@@ -1,6 +1,7 @@
 //! Shared utilities for CLI commands
 
 use anyhow::{Context, Result};
+use blake3::Hasher;
 use journal::{Checkpoint, Journal, PinManager};
 use owo_colors::OwoColorize;
 use std::collections::HashMap;
@@ -10,8 +11,7 @@ use ulid::Ulid;
 
 /// Find repository root by walking up from cwd to find .tl/
 pub fn find_repo_root() -> Result<PathBuf> {
-    let mut current = std::env::current_dir()
-        .context("Failed to get current directory")?;
+    let mut current = std::env::current_dir().context("Failed to get current directory")?;
 
     loop {
         let tl_dir = current.join(".tl");
@@ -23,6 +23,57 @@ pub fn find_repo_root() -> Result<PathBuf> {
             Some(parent) => current = parent.to_path_buf(),
             None => anyhow::bail!("Not a Timelapse repository (no .tl directory found)"),
         }
+    }
+}
+
+/// Resolve the daemon socket path for a repository.
+///
+/// We intentionally keep the socket outside the repo tree to avoid Unix socket
+/// pathname limits on macOS for deep workspaces and temporary clone paths.
+pub fn daemon_socket_path(repo_root: &Path) -> Result<PathBuf> {
+    let canonical_repo_root = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf());
+
+    let mut hasher = Hasher::new();
+    hasher.update(canonical_repo_root.as_os_str().as_encoded_bytes());
+    let repo_hash = hasher.finalize().to_hex();
+
+    #[cfg(unix)]
+    let runtime_dir = {
+        use nix::unistd::Uid;
+
+        PathBuf::from(format!("/tmp/tl-{}", Uid::current()))
+    };
+
+    #[cfg(not(unix))]
+    let runtime_dir = std::env::temp_dir().join("timelapse");
+
+    let socket_dir = runtime_dir.join("sockets");
+    std::fs::create_dir_all(&socket_dir).context("Failed to create daemon socket directory")?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let permissions = std::fs::Permissions::from_mode(0o700);
+        std::fs::set_permissions(&runtime_dir, permissions.clone())
+            .context("Failed to secure daemon runtime directory")?;
+        std::fs::set_permissions(&socket_dir, permissions)
+            .context("Failed to secure daemon socket directory")?;
+    }
+
+    Ok(socket_dir.join(format!("{}.sock", &repo_hash[..24])))
+}
+
+/// Remove the legacy repo-local daemon socket if present.
+///
+/// Older builds stored the socket at `.tl/state/daemon.sock`. Clean it up
+/// opportunistically so stale files do not confuse diagnostics.
+pub fn cleanup_legacy_daemon_socket(tl_dir: &Path) {
+    let legacy_socket_path = tl_dir.join("state/daemon.sock");
+    if legacy_socket_path.exists() {
+        let _ = std::fs::remove_file(legacy_socket_path);
     }
 }
 
@@ -54,6 +105,99 @@ pub fn git_fetch_origin(repo_root: &Path, prune: bool) -> Result<()> {
     anyhow::bail!("git fetch failed: {}", stderr.trim());
 }
 
+/// Fetch a single remote branch into its remote-tracking ref.
+///
+/// This is cheaper than a full remote fetch on multi-branch remotes and is
+/// appropriate for `tl pull`, which only needs one sync target.
+pub fn git_fetch_branch(repo_root: &Path, remote: &str, branch: &str, prune: bool) -> Result<()> {
+    let refspec = format!("refs/heads/{branch}:refs/remotes/{remote}/{branch}");
+    let mut args = vec!["fetch", "--quiet"];
+    if prune {
+        args.push("--prune");
+    }
+    args.push(remote);
+    args.push(&refspec);
+
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(repo_root)
+        .output()
+        .context("Failed to run git fetch for branch")?;
+
+    if out.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if stderr.trim().is_empty() {
+        anyhow::bail!("git fetch failed with status {}", out.status);
+    }
+    anyhow::bail!("git fetch failed: {}", stderr.trim());
+}
+
+/// Resolve a Git ref to its commit ID, returning None when the ref is missing.
+pub fn git_resolve_ref(repo_root: &Path, ref_name: &str) -> Result<Option<String>> {
+    let out = Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", ref_name])
+        .current_dir(repo_root)
+        .output()
+        .context("Failed to run git rev-parse")?;
+
+    if !out.status.success() {
+        return Ok(None);
+    }
+
+    let commit = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if commit.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(commit))
+    }
+}
+
+/// Return true when the working tree has staged, unstaged, or untracked changes.
+pub fn git_has_working_tree_changes(repo_root: &Path) -> Result<bool> {
+    let out = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(repo_root)
+        .output()
+        .context("Failed to run git status --porcelain")?;
+
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        anyhow::bail!("Failed to inspect working tree: {}", stderr.trim());
+    }
+
+    Ok(!String::from_utf8_lossy(&out.stdout).trim().is_empty())
+}
+
+/// Push the current HEAD to a specific remote branch using the native git CLI.
+pub fn git_push_head(repo_root: &Path, remote: &str, branch: &str, force: bool) -> Result<()> {
+    let target = format!("HEAD:refs/heads/{branch}");
+    let mut args = vec!["push", "--quiet"];
+    if force {
+        args.push("--force");
+    }
+    args.push(remote);
+    args.push(&target);
+
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(repo_root)
+        .output()
+        .context("Failed to run git push")?;
+
+    if out.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if stderr.trim().is_empty() {
+        anyhow::bail!("git push failed with status {}", out.status);
+    }
+    anyhow::bail!("git push failed: {}", stderr.trim());
+}
+
 /// Return the current local Git branch name, or None if HEAD is detached.
 pub fn git_current_branch(repo_root: &Path) -> Result<Option<String>> {
     let out = Command::new("git")
@@ -78,7 +222,12 @@ pub fn git_current_branch(repo_root: &Path) -> Result<Option<String>> {
 /// Return the configured upstream as (remote, branch), or None if no upstream exists.
 pub fn git_upstream_branch(repo_root: &Path) -> Result<Option<(String, String)>> {
     let out = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
+        .args([
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ])
         .current_dir(repo_root)
         .output()
         .context("Failed to run git rev-parse @{upstream}")?;
@@ -114,7 +263,10 @@ pub fn git_remote_default_branch(repo_root: &Path, remote: &str) -> Result<Optio
 
     let symbolic_ref = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let prefix = format!("refs/remotes/{remote}/");
-    let branch = symbolic_ref.strip_prefix(&prefix).unwrap_or(&symbolic_ref).to_string();
+    let branch = symbolic_ref
+        .strip_prefix(&prefix)
+        .unwrap_or(&symbolic_ref)
+        .to_string();
     if branch.is_empty() || branch == "HEAD" {
         Ok(None)
     } else {
@@ -293,22 +445,46 @@ pub fn format_duration(secs: u64) -> String {
         format!("{} seconds", secs)
     } else if secs < HOUR {
         let mins = secs / MINUTE;
-        if mins == 1 { "1 minute".to_string() } else { format!("{} minutes", mins) }
+        if mins == 1 {
+            "1 minute".to_string()
+        } else {
+            format!("{} minutes", mins)
+        }
     } else if secs < DAY {
         let hours = secs / HOUR;
-        if hours == 1 { "1 hour".to_string() } else { format!("{} hours", hours) }
+        if hours == 1 {
+            "1 hour".to_string()
+        } else {
+            format!("{} hours", hours)
+        }
     } else if secs < WEEK {
         let days = secs / DAY;
-        if days == 1 { "1 day".to_string() } else { format!("{} days", days) }
+        if days == 1 {
+            "1 day".to_string()
+        } else {
+            format!("{} days", days)
+        }
     } else if secs < MONTH {
         let weeks = secs / WEEK;
-        if weeks == 1 { "1 week".to_string() } else { format!("{} weeks", weeks) }
+        if weeks == 1 {
+            "1 week".to_string()
+        } else {
+            format!("{} weeks", weeks)
+        }
     } else if secs < YEAR {
         let months = secs / MONTH;
-        if months == 1 { "1 month".to_string() } else { format!("{} months", months) }
+        if months == 1 {
+            "1 month".to_string()
+        } else {
+            format!("{} months", months)
+        }
     } else {
         let years = secs / YEAR;
-        if years == 1 { "1 year".to_string() } else { format!("{} years", years) }
+        if years == 1 {
+            "1 year".to_string()
+        } else {
+            format!("{} years", years)
+        }
     }
 }
 
@@ -398,7 +574,7 @@ pub fn parse_git_user_config(repo_root: &Path) -> Result<Option<(String, String)
     // Global configs (checked first, can be overridden)
     if let Some(ref h) = home {
         config_paths.push(h.join(".config/git/config")); // XDG location
-        config_paths.push(h.join(".gitconfig"));          // Traditional location
+        config_paths.push(h.join(".gitconfig")); // Traditional location
     }
 
     // Local repo config (checked last, overrides global)
@@ -531,8 +707,7 @@ pub fn ensure_gitignore_patterns(repo_root: &Path, patterns: &[&str]) -> Result<
 
     // Read existing content or start with empty
     let existing_content = if gitignore_path.exists() {
-        fs::read_to_string(&gitignore_path)
-            .context("Failed to read .gitignore")?
+        fs::read_to_string(&gitignore_path).context("Failed to read .gitignore")?
     } else {
         String::new()
     };
@@ -574,19 +749,20 @@ pub fn ensure_gitignore_patterns(repo_root: &Path, patterns: &[&str]) -> Result<
 
     // Atomic write using temp file + rename
     let temp_path = gitignore_path.with_extension("gitignore.tmp");
-    let mut temp_file = fs::File::create(&temp_path)
-        .context("Failed to create temporary .gitignore")?;
+    let mut temp_file =
+        fs::File::create(&temp_path).context("Failed to create temporary .gitignore")?;
 
-    temp_file.write_all(new_content.as_bytes())
+    temp_file
+        .write_all(new_content.as_bytes())
         .context("Failed to write to temporary .gitignore")?;
 
-    temp_file.sync_all()
+    temp_file
+        .sync_all()
         .context("Failed to sync temporary .gitignore")?;
 
     drop(temp_file);
 
-    fs::rename(&temp_path, &gitignore_path)
-        .context("Failed to rename temporary .gitignore")?;
+    fs::rename(&temp_path, &gitignore_path).context("Failed to rename temporary .gitignore")?;
 
     Ok(())
 }
@@ -638,7 +814,10 @@ mod tests {
         use tempfile::TempDir;
 
         let temp = TempDir::new()?;
-        assert!(!detect_git_repo(temp.path())?, "Should not detect git in empty dir");
+        assert!(
+            !detect_git_repo(temp.path())?,
+            "Should not detect git in empty dir"
+        );
 
         // Create .git directory
         std::fs::create_dir(temp.path().join(".git"))?;
@@ -661,7 +840,10 @@ mod tests {
 
         // Test with no config (and no global config due to HOME override)
         let result = parse_git_user_config(temp.path())?;
-        assert!(result.is_none(), "Should return None when no config exists (local or global)");
+        assert!(
+            result.is_none(),
+            "Should return None when no config exists (local or global)"
+        );
 
         // Test with valid local config
         let config = r#"
@@ -692,7 +874,10 @@ mod tests {
         std::fs::write(temp.path().join(".git/config"), config_no_email)?;
 
         let result = parse_git_user_config(temp.path())?;
-        assert!(result.is_none(), "Should return None when email is missing and no global config");
+        assert!(
+            result.is_none(),
+            "Should return None when email is missing and no global config"
+        );
 
         // Test global config fallback: create a global .gitconfig
         let global_config = r#"
@@ -723,7 +908,10 @@ mod tests {
         let result = parse_git_user_config(temp.path())?;
         assert_eq!(
             result,
-            Some(("Local Override".to_string(), "local@example.com".to_string())),
+            Some((
+                "Local Override".to_string(),
+                "local@example.com".to_string()
+            )),
             "Local config should override global config"
         );
 
@@ -764,8 +952,7 @@ mod tests {
         assert_eq!(result.len(), 1, "Should find one remote");
         assert_eq!(result[0].0, "origin", "Remote name should be origin");
         assert_eq!(
-            result[0].1,
-            "https://github.com/user/repo.git",
+            result[0].1, "https://github.com/user/repo.git",
             "Remote URL should match"
         );
 
@@ -797,7 +984,10 @@ mod tests {
         let content = std::fs::read_to_string(temp.path().join(".gitignore"))?;
         assert!(content.contains(".tl/"), "Should contain .tl/ pattern");
         assert!(content.contains("*.log"), "Should contain *.log pattern");
-        assert!(content.contains("# Timelapse"), "Should contain header comment");
+        assert!(
+            content.contains("# Timelapse"),
+            "Should contain header comment"
+        );
 
         // Test idempotency - adding same patterns again
         ensure_gitignore_patterns(temp.path(), &[".tl/"])?;
@@ -814,7 +1004,10 @@ mod tests {
 
         let content3 = std::fs::read_to_string(temp.path().join(".gitignore"))?;
         assert!(content3.contains("*.tmp"), "Should append new pattern");
-        assert!(content3.contains(".tl/"), "Should preserve existing patterns");
+        assert!(
+            content3.contains(".tl/"),
+            "Should preserve existing patterns"
+        );
 
         Ok(())
     }

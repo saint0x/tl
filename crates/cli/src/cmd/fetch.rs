@@ -3,13 +3,13 @@
 //! Fetches updates from the remote and syncs the working directory.
 //! This is the standard git-like behavior: fetch + update working copy.
 
-use anyhow::{Context, Result};
-use crate::util;
 use crate::cmd::restore::restore_tree;
+use crate::util;
+use anyhow::{Context, Result};
 use journal::{StashEntry, StashManager};
 use owo_colors::OwoColorize;
-use tl_core::Store;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tl_core::Store;
 
 pub async fn run(no_sync: bool, prune: bool) -> Result<()> {
     // 1. Find repository root
@@ -34,8 +34,7 @@ pub async fn run(no_sync: bool, prune: bool) -> Result<()> {
 
     // 3. Load workspace
     println!("{}", "Fetching from remote...".dimmed());
-    let mut workspace = jj::load_workspace(&repo_root)
-        .context("Failed to load JJ workspace")?;
+    let mut workspace = jj::load_workspace(&repo_root).context("Failed to load JJ workspace")?;
 
     // 4. Perform native git fetch via JJ (imports refs, updates view)
     jj::git_ops::native_git_fetch(&mut workspace)?;
@@ -48,7 +47,9 @@ pub async fn run(no_sync: bool, prune: bool) -> Result<()> {
         println!();
         println!("Remote branches:");
         for branch in &branches {
-            let remote_id = branch.remote_commit_id.as_ref()
+            let remote_id = branch
+                .remote_commit_id
+                .as_ref()
                 .map(|s| &s[..12.min(s.len())])
                 .unwrap_or("???");
 
@@ -64,7 +65,12 @@ pub async fn run(no_sync: bool, prune: bool) -> Result<()> {
                 "new".cyan().to_string()
             };
 
-            println!("  {} {} ({})", branch.name.cyan(), remote_id.dimmed(), status);
+            println!(
+                "  {} {} ({})",
+                branch.name.cyan(),
+                remote_id.dimmed(),
+                status
+            );
         }
     } else {
         println!("{}", "No remote branches found".dimmed());
@@ -106,7 +112,8 @@ async fn sync_working_directory(
                 format!(
                     "Remote branch '{}' is not present; skipping working directory sync.",
                     branch_name
-                ).dimmed()
+                )
+                .dimmed()
             );
             return Ok(());
         }
@@ -133,7 +140,11 @@ async fn sync_working_directory(
     let mut any_synced = false;
     if let Some(remote_commit_id) = &sync_branch.remote_commit_id {
         let short_id = &remote_commit_id[..12.min(remote_commit_id.len())];
-        println!("  Updating {} to {}", sync_branch.name.cyan(), short_id.green());
+        println!(
+            "  Updating {} to {}",
+            sync_branch.name.cyan(),
+            short_id.green()
+        );
 
         match jj::git_ops::export_commit_to_dir(workspace, remote_commit_id, repo_root) {
             Ok(()) => {
@@ -149,7 +160,7 @@ async fn sync_working_directory(
     // CRITICAL: Invalidate pathmap after modifying working directory
     // The daemon's in-memory pathmap is now stale and needs to be rebuilt
     if any_synced {
-        let socket_path = tl_dir.join("state/daemon.sock");
+        let socket_path = crate::util::daemon_socket_path(&repo_root)?;
         if socket_path.exists() {
             if let Ok(mut client) = crate::ipc::IpcClient::connect(&socket_path).await {
                 if let Err(e) = client.invalidate_pathmap().await {
@@ -175,7 +186,10 @@ async fn check_and_auto_stash(
     tl_dir: &std::path::Path,
     stash_manager: &StashManager,
 ) -> Result<Option<StashEntry>> {
-    let socket_path = tl_dir.join("state/daemon.sock");
+    let repo_root = tl_dir
+        .parent()
+        .context("Invalid Timelapse directory: missing repo root")?;
+    let socket_path = crate::util::daemon_socket_path(repo_root)?;
     let resilient = crate::ipc::ResilientIpcClient::new(socket_path);
 
     let base = match resilient
@@ -200,16 +214,18 @@ async fn check_and_auto_stash(
 
                 let entry = StashEntry {
                     checkpoint_id,
-                    created_at_ms: SystemTime::now()
-                        .duration_since(UNIX_EPOCH)?
-                        .as_millis() as u64,
+                    created_at_ms: SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64,
                     message: Some("Auto-stash before fetch".to_string()),
                     base_checkpoint_id: base_id,
                 };
 
                 stash_manager.push(entry.clone())?;
                 let short_stash_id = &checkpoint_id.to_string()[..8];
-                println!("  {} Stashed changes at {}", "✓".green(), short_stash_id.yellow());
+                println!(
+                    "  {} Stashed changes at {}",
+                    "✓".green(),
+                    short_stash_id.yellow()
+                );
 
                 return Ok(Some(entry));
             }
@@ -265,10 +281,18 @@ fn reapply_stash(
     let result = restore_tree(&store, &stash_tree, repo_root, false)?;
 
     if result.errors.is_empty() {
-        println!("  {} Re-applied {} files", "✓".green(), result.files_restored);
+        println!(
+            "  {} Re-applied {} files",
+            "✓".green(),
+            result.files_restored
+        );
     } else {
-        println!("  {} Re-applied {} files with {} errors",
-            "⚠".yellow(), result.files_restored, result.errors.len());
+        println!(
+            "  {} Re-applied {} files with {} errors",
+            "⚠".yellow(),
+            result.files_restored,
+            result.errors.len()
+        );
         for error in result.errors.iter().take(3) {
             println!("    {}", error.red());
         }

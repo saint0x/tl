@@ -19,13 +19,13 @@ use jj_lib::repo::{ReadonlyRepo, Repo};
 use jj_lib::settings::UserSettings;
 use jj_lib::str_util::StringExpression;
 use jj_lib::workspace::Workspace;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Create default UserSettings for jj-lib operations
 fn create_user_settings() -> Result<UserSettings> {
     let config = StackedConfig::with_defaults();
-    UserSettings::from_config(config)
-        .map_err(|e| anyhow!("Failed to create user settings: {}", e))
+    UserSettings::from_config(config).map_err(|e| anyhow!("Failed to create user settings: {}", e))
 }
 
 /// Result of a push operation for a single branch
@@ -67,21 +67,37 @@ pub enum BranchPushStatus {
 /// * `force` - Force push (non-fast-forward)
 pub fn native_git_push(
     workspace: &mut Workspace,
+    remote: &str,
     bookmark: Option<&str>,
     all: bool,
-    _force: bool,
+    force: bool,
 ) -> Result<Vec<BranchPushResult>> {
+    // Refresh the remote-tracking refs immediately before push so JJ's push
+    // negotiation uses the real remote head instead of whatever the local
+    // view happened to know earlier in the session.
+    if all {
+        native_git_fetch_filtered(workspace, remote, StringExpression::all())?;
+    } else if let Some(bookmark_name) = bookmark {
+        native_git_fetch_filtered(
+            workspace,
+            remote,
+            StringExpression::exact(bookmark_name.to_string()),
+        )?;
+    }
+
     // Load repo at HEAD
     let user_settings = create_user_settings()?;
-    let repo = workspace.repo_loader().load_at_head()
+    let repo = workspace
+        .repo_loader()
+        .load_at_head()
         .context("Failed to load repository")?;
 
     // Start transaction
     let mut tx = repo.start_transaction();
 
     // Get GitSettings for subprocess operations
-    let git_settings = GitSettings::from_settings(&user_settings)
-        .context("Failed to get git settings")?;
+    let git_settings =
+        GitSettings::from_settings(&user_settings).context("Failed to get git settings")?;
 
     // Get branches (bookmarks) to push from view
     let view = tx.repo_mut().view();
@@ -89,15 +105,16 @@ pub fn native_git_push(
     // Collect branches to validate and push
     let mut branches_to_push: Vec<(String, Option<String>, Option<String>)> = Vec::new(); // (name, local_commit, remote_commit)
 
-    // Create RemoteName for "origin" (used for remote bookmark lookups)
-    let origin_remote: &RemoteName = "origin".as_ref();
+    // Create RemoteName for remote bookmark lookups / push.
+    let remote_name = RemoteName::new(remote);
+    let remote_name_ref: &RemoteName = remote_name.as_ref();
 
     if all {
         // Collect all local bookmarks so Timelapse tracks the real Git branch set.
         for (bookmark_name, target) in view.local_bookmarks() {
             if let Some(local_commit_id) = target.as_normal() {
                 // Create remote symbol for lookup
-                let remote_symbol = bookmark_name.to_remote_symbol(origin_remote);
+                let remote_symbol = bookmark_name.to_remote_symbol(remote_name_ref);
                 let remote_ref = view.get_remote_bookmark(remote_symbol);
                 let remote_commit_id = remote_ref.target.as_normal().map(|id| id.hex());
                 branches_to_push.push((
@@ -115,7 +132,7 @@ pub fn native_git_push(
         let ref_name: &RefName = full_name.as_ref();
         let target = view.get_local_bookmark(ref_name);
         if let Some(local_commit_id) = target.as_normal() {
-            let remote_symbol = ref_name.to_remote_symbol(origin_remote);
+            let remote_symbol = ref_name.to_remote_symbol(remote_name_ref);
             let remote_ref = view.get_remote_bookmark(remote_symbol);
             let remote_commit_id = remote_ref.target.as_normal().map(|id| id.hex());
             branches_to_push.push((
@@ -134,23 +151,47 @@ pub fn native_git_push(
         anyhow::bail!("No branches to push");
     }
 
-    // Pre-validate: Check for up-to-date branches
-    let mut up_to_date_branches = Vec::new();
-
-    for (name, local_commit, remote_commit) in &branches_to_push {
-        if let (Some(local), Some(remote)) = (local_commit, remote_commit) {
-            if local == remote {
-                up_to_date_branches.push(name.clone());
-            }
-        }
-    }
-
     // Build branch update targets (skip up-to-date branches)
     let mut branch_updates = Vec::new();
     let mut results = Vec::new();
+    let mut up_to_date_branches = HashSet::new();
+    let index = repo.index();
 
     for (name, local_commit, remote_commit) in &branches_to_push {
         // Skip up-to-date branches
+        if let (Some(local), Some(remote)) = (local_commit, remote_commit) {
+            if local == remote {
+                up_to_date_branches.insert(name.clone());
+                results.push(BranchPushResult {
+                    name: name.clone(),
+                    status: BranchPushStatus::UpToDate,
+                    old_commit: remote_commit.clone(),
+                    new_commit: local_commit.clone(),
+                });
+                continue;
+            }
+        }
+
+        if !force {
+            if let (Some(local_hex), Some(remote_hex)) = (local_commit, remote_commit) {
+                let local_commit_id = parse_commit_id_hex(local_hex)?;
+                let remote_commit_id = parse_commit_id_hex(remote_hex)?;
+                let is_fast_forward = index
+                    .is_ancestor(&remote_commit_id, &local_commit_id)
+                    .context("Failed to check push ancestry")?;
+
+                if !is_fast_forward {
+                    results.push(BranchPushResult {
+                        name: name.clone(),
+                        status: BranchPushStatus::Diverged,
+                        old_commit: remote_commit.clone(),
+                        new_commit: local_commit.clone(),
+                    });
+                    continue;
+                }
+            }
+        }
+
         if up_to_date_branches.contains(name) {
             results.push(BranchPushResult {
                 name: name.clone(),
@@ -162,14 +203,11 @@ pub fn native_git_push(
         }
 
         if let Some(local_hex) = local_commit {
-            // Use hex::decode + CommitId::new to avoid lifetime issues with from_hex
-            let local_commit_id = jj_lib::backend::CommitId::new(
-                hex::decode(local_hex).expect("Invalid local commit hex")
-            );
-            let old_target = remote_commit.as_ref()
-                .map(|h| jj_lib::backend::CommitId::new(
-                    hex::decode(h).expect("Invalid remote commit hex")
-                ));
+            let local_commit_id = parse_commit_id_hex(local_hex)?;
+            let old_target = remote_commit
+                .as_deref()
+                .map(parse_commit_id_hex)
+                .transpose()?;
 
             let ref_name = RefNameBuf::from(name.clone());
             branch_updates.push((
@@ -188,22 +226,24 @@ pub fn native_git_push(
     }
 
     // Store names for results before moving branch_updates
-    let update_names: Vec<String> = branch_updates.iter()
+    let update_names: Vec<String> = branch_updates
+        .iter()
         .map(|(name, _)| name.as_str().to_string())
         .collect();
 
-    let targets = GitBranchPushTargets {
-        branch_updates,
-    };
-
-    // Create remote name
-    let remote_name = RemoteName::new("origin");
+    let targets = GitBranchPushTargets { branch_updates };
 
     // Set up callbacks (progress only - auth is handled by git subprocess)
     let callbacks = RemoteCallbacks::default();
 
     // Execute push using JJ's native API (uses git subprocess internally)
-    match push_branches(tx.repo_mut(), &git_settings, &remote_name, &targets, callbacks) {
+    match push_branches(
+        tx.repo_mut(),
+        &git_settings,
+        &remote_name,
+        &targets,
+        callbacks,
+    ) {
         Ok(stats) => {
             // Check for rejections
             if !stats.rejected.is_empty() || !stats.remote_rejected.is_empty() {
@@ -221,11 +261,15 @@ pub fn native_git_push(
 
             // Push succeeded - record results
             for name in update_names {
+                let pushed_branch = branches_to_push
+                    .iter()
+                    .find(|(branch_name, _, _)| branch_name == &name);
                 results.push(BranchPushResult {
                     name,
                     status: BranchPushStatus::Pushed,
-                    old_commit: None,
-                    new_commit: None,
+                    old_commit: pushed_branch
+                        .and_then(|(_, _, remote_commit)| remote_commit.clone()),
+                    new_commit: pushed_branch.and_then(|(_, local_commit, _)| local_commit.clone()),
                 });
             }
         }
@@ -233,15 +277,22 @@ pub fn native_git_push(
             // Convert error and propagate
             return Err(match e {
                 GitPushError::NoSuchRemote(name) => {
-                    anyhow!("Remote '{}' not found. Add one with: git remote add {} <url>", name.as_str(), name.as_str())
+                    anyhow!(
+                        "Remote '{}' not found. Add one with: git remote add {} <url>",
+                        name.as_str(),
+                        name.as_str()
+                    )
                 }
                 GitPushError::RemoteName(err) => {
                     anyhow!("Invalid remote name: {}", err)
                 }
                 GitPushError::Subprocess(err) => {
                     let error_msg = err.to_string();
-                    if error_msg.contains("authentication") || error_msg.contains("Authentication")
-                        || error_msg.contains("Permission denied") || error_msg.contains("could not read Username") {
+                    if error_msg.contains("authentication")
+                        || error_msg.contains("Authentication")
+                        || error_msg.contains("Permission denied")
+                        || error_msg.contains("could not read Username")
+                    {
                         anyhow!(
                             "Authentication failed. Configure credentials:\n\
                              - GitHub: Use SSH keys or GitHub CLI (gh auth login && gh auth setup-git)\n\
@@ -249,15 +300,22 @@ pub fn native_git_push(
                              Error: {}",
                             error_msg
                         )
-                    } else if error_msg.contains("non-fast-forward") || error_msg.contains("rejected") {
+                    } else if error_msg.contains("non-fast-forward")
+                        || error_msg.contains("rejected")
+                    {
                         anyhow!(
                             "Push rejected (non-fast-forward). Remote has changes you don't have.\n\
                              Try: tl pull\n\
                              Or use --force to force push (overwrites remote)"
                         )
-                    } else if error_msg.contains("network") || error_msg.contains("timeout")
-                        || error_msg.contains("Could not resolve") {
-                        anyhow!("Network error: {}\nCheck your internet connection", error_msg)
+                    } else if error_msg.contains("network")
+                        || error_msg.contains("timeout")
+                        || error_msg.contains("Could not resolve")
+                    {
+                        anyhow!(
+                            "Network error: {}\nCheck your internet connection",
+                            error_msg
+                        )
                     } else {
                         anyhow!("Git push failed: {}", error_msg)
                     }
@@ -276,6 +334,12 @@ pub fn native_git_push(
     Ok(results)
 }
 
+fn parse_commit_id_hex(hex_id: &str) -> Result<CommitId> {
+    Ok(CommitId::new(
+        hex::decode(hex_id).context("Invalid commit ID hex")?,
+    ))
+}
+
 /// Fetch from Git remote using jj-lib's native GitFetch API
 ///
 /// This uses JJ's high-level fetch function which handles:
@@ -286,7 +350,7 @@ pub fn native_git_push(
 /// # Arguments
 /// * `workspace` - JJ workspace (must be git-backed)
 pub fn native_git_fetch(workspace: &mut Workspace) -> Result<()> {
-    native_git_fetch_filtered(workspace, StringExpression::all())
+    native_git_fetch_filtered(workspace, "origin", StringExpression::all())
 }
 
 /// Fetch from Git remote using jj-lib's native GitFetch API, but only for
@@ -294,21 +358,27 @@ pub fn native_git_fetch(workspace: &mut Workspace) -> Result<()> {
 ///
 /// This is useful for latency-sensitive operations (like `tl pull`) where
 /// fetching all branches on a large remote can dominate runtime.
-pub fn native_git_fetch_filtered(workspace: &mut Workspace, bookmark_expr: StringExpression) -> Result<()> {
+pub fn native_git_fetch_filtered(
+    workspace: &mut Workspace,
+    remote: &str,
+    bookmark_expr: StringExpression,
+) -> Result<()> {
     // Load repo at HEAD
     let user_settings = create_user_settings()?;
-    let repo = workspace.repo_loader().load_at_head()
+    let repo = workspace
+        .repo_loader()
+        .load_at_head()
         .context("Failed to load repository")?;
 
     // Start transaction
     let mut tx = repo.start_transaction();
 
     // Get GitSettings for subprocess operations
-    let git_settings = GitSettings::from_settings(&user_settings)
-        .context("Failed to get git settings")?;
+    let git_settings =
+        GitSettings::from_settings(&user_settings).context("Failed to get git settings")?;
 
     // Create remote name
-    let remote_name = RemoteName::new("origin");
+    let remote_name = RemoteName::new(remote);
 
     // Expand refspecs for fetching selected branches (refs/heads/* patterns)
     let refspecs = expand_fetch_refspecs(&remote_name, bookmark_expr)
@@ -318,45 +388,60 @@ pub fn native_git_fetch_filtered(workspace: &mut Workspace, bookmark_expr: Strin
     let callbacks = RemoteCallbacks::default();
 
     // Create GitFetch helper
-    let mut git_fetch = GitFetch::new(tx.repo_mut(), &git_settings)
-        .context("Failed to create git fetch helper")?;
+    let mut git_fetch =
+        GitFetch::new(tx.repo_mut(), &git_settings).context("Failed to create git fetch helper")?;
 
     // Execute fetch
-    git_fetch.fetch(
-        &remote_name,
-        refspecs,
-        callbacks,
-        None,  // depth
-        None,  // fetch_tags_override
-    ).map_err(|e| match e {
-        GitFetchError::NoSuchRemote(name) => {
-            anyhow!("Remote '{}' not found. Add one with: git remote add {} <url>", name.as_str(), name.as_str())
-        }
-        GitFetchError::RemoteName(err) => {
-            anyhow!("Invalid remote name: {}", err)
-        }
-        GitFetchError::Subprocess(err) => {
-            let error_msg = err.to_string();
-            if error_msg.contains("authentication") || error_msg.contains("Authentication")
-                || error_msg.contains("Permission denied") || error_msg.contains("could not read Username") {
+    git_fetch
+        .fetch(
+            &remote_name,
+            refspecs,
+            callbacks,
+            None, // depth
+            None, // fetch_tags_override
+        )
+        .map_err(|e| match e {
+            GitFetchError::NoSuchRemote(name) => {
                 anyhow!(
-                    "Authentication failed during fetch. Configure credentials:\n\
+                    "Remote '{}' not found. Add one with: git remote add {} <url>",
+                    name.as_str(),
+                    name.as_str()
+                )
+            }
+            GitFetchError::RemoteName(err) => {
+                anyhow!("Invalid remote name: {}", err)
+            }
+            GitFetchError::Subprocess(err) => {
+                let error_msg = err.to_string();
+                if error_msg.contains("authentication")
+                    || error_msg.contains("Authentication")
+                    || error_msg.contains("Permission denied")
+                    || error_msg.contains("could not read Username")
+                {
+                    anyhow!(
+                        "Authentication failed during fetch. Configure credentials:\n\
                      - GitHub: Use SSH keys or GitHub CLI (gh auth login && gh auth setup-git)\n\
                      - GitLab: Use SSH keys or personal access tokens\n\
                      Error: {}",
-                    error_msg
-                )
-            } else if error_msg.contains("network") || error_msg.contains("timeout")
-                || error_msg.contains("Could not resolve") {
-                anyhow!("Network error: {}\nCheck your internet connection", error_msg)
-            } else {
-                anyhow!("Git fetch failed: {}", error_msg)
+                        error_msg
+                    )
+                } else if error_msg.contains("network")
+                    || error_msg.contains("timeout")
+                    || error_msg.contains("Could not resolve")
+                {
+                    anyhow!(
+                        "Network error: {}\nCheck your internet connection",
+                        error_msg
+                    )
+                } else {
+                    anyhow!("Git fetch failed: {}", error_msg)
+                }
             }
-        }
-    })?;
+        })?;
 
     // Import fetched refs into JJ
-    git_fetch.import_refs()
+    git_fetch
+        .import_refs()
         .context("Failed to import fetched refs")?;
 
     // Commit transaction
@@ -373,9 +458,14 @@ pub fn native_git_fetch_filtered(workspace: &mut Workspace, bookmark_expr: Strin
 ///
 /// This is critical for performance on large remotes: enumerating local
 /// bookmarks into a giant union of refspecs can dominate runtime.
-pub fn native_git_fetch_for_pull(workspace: &mut Workspace, branch_name: &str) -> Result<()> {
+pub fn native_git_fetch_for_pull(
+    workspace: &mut Workspace,
+    remote: &str,
+    branch_name: &str,
+) -> Result<()> {
     native_git_fetch_filtered(
         workspace,
+        remote,
         StringExpression::exact(branch_name.to_string()),
     )
 }
@@ -385,8 +475,12 @@ pub fn native_git_fetch_for_pull(workspace: &mut Workspace, branch_name: &str) -
 ///
 /// Intended for fast-path UX (e.g. `tl pull`, `tl fetch`) where we only need
 /// to know which branches changed and whether they're diverged.
-pub fn get_remote_branch_updates_fast(workspace: &jj_lib::workspace::Workspace) -> Result<Vec<RemoteBranchInfo>> {
-    let repo = workspace.repo_loader().load_at_head()
+pub fn get_remote_branch_updates_fast(
+    workspace: &jj_lib::workspace::Workspace,
+) -> Result<Vec<RemoteBranchInfo>> {
+    let repo = workspace
+        .repo_loader()
+        .load_at_head()
         .context("Failed to load repository")?;
 
     let view = repo.view();
@@ -410,9 +504,11 @@ pub fn get_remote_branch_updates_fast(workspace: &jj_lib::workspace::Workspace) 
             if local_target.hex() == remote_target.hex() {
                 false
             } else {
-                let local_ancestor = index.is_ancestor(local_target, remote_target)
+                let local_ancestor = index
+                    .is_ancestor(local_target, remote_target)
                     .context("Failed to check ancestry (local->remote)")?;
-                let remote_ancestor = index.is_ancestor(remote_target, local_target)
+                let remote_ancestor = index
+                    .is_ancestor(remote_target, local_target)
                     .context("Failed to check ancestry (remote->local)")?;
                 !local_ancestor && !remote_ancestor
             }
@@ -439,17 +535,38 @@ pub fn get_remote_branch_updates_fast(workspace: &jj_lib::workspace::Workspace) 
 /// Return the target commit for a specific remote bookmark on origin.
 pub fn get_remote_bookmark_head(
     workspace: &jj_lib::workspace::Workspace,
+    remote: &str,
     bookmark_name: &str,
 ) -> Result<Option<String>> {
-    let repo = workspace.repo_loader().load_at_head()
+    let repo = workspace
+        .repo_loader()
+        .load_at_head()
         .context("Failed to load repository")?;
 
     let view = repo.view();
-    let origin_remote = RemoteName::new("origin");
+    let origin_remote = RemoteName::new(remote);
     let ref_name: &RefName = bookmark_name.as_ref();
     let remote_symbol = ref_name.to_remote_symbol(&origin_remote);
     let remote_ref = view.get_remote_bookmark(remote_symbol);
     Ok(remote_ref.target.as_normal().map(|id| id.hex()))
+}
+
+/// Return the target commit for a specific local bookmark.
+pub fn get_local_bookmark_head(
+    workspace: &jj_lib::workspace::Workspace,
+    bookmark_name: &str,
+) -> Result<Option<String>> {
+    let repo = workspace
+        .repo_loader()
+        .load_at_head()
+        .context("Failed to load repository")?;
+
+    let view = repo.view();
+    let ref_name: &RefName = bookmark_name.as_ref();
+    Ok(view
+        .get_local_bookmark(ref_name)
+        .as_normal()
+        .map(|id| id.hex()))
 }
 
 /// Calculate how many commits ahead and behind two branches are
@@ -464,8 +581,6 @@ fn calculate_ahead_behind(
     local_id: &CommitId,
     remote_id: &CommitId,
 ) -> Result<(usize, usize)> {
-    use std::collections::HashSet;
-
     // If commits are the same, no difference
     if local_id == remote_id {
         return Ok((0, 0));
@@ -513,7 +628,10 @@ fn calculate_ahead_behind(
     }
 
     // Find common ancestors (intersection)
-    let common: HashSet<_> = local_ancestors.intersection(&remote_ancestors).cloned().collect();
+    let common: HashSet<_> = local_ancestors
+        .intersection(&remote_ancestors)
+        .cloned()
+        .collect();
 
     // Count commits ahead: local commits not in remote ancestors (excluding common)
     let commits_ahead = local_ancestors
@@ -550,8 +668,12 @@ pub struct RemoteBranchInfo {
 /// Get information about remote branches after fetch
 ///
 /// Returns branches that have updates from remote
-pub fn get_remote_branch_updates(workspace: &jj_lib::workspace::Workspace) -> Result<Vec<RemoteBranchInfo>> {
-    let repo = workspace.repo_loader().load_at_head()
+pub fn get_remote_branch_updates(
+    workspace: &jj_lib::workspace::Workspace,
+) -> Result<Vec<RemoteBranchInfo>> {
+    let repo = workspace
+        .repo_loader()
+        .load_at_head()
         .context("Failed to load repository")?;
 
     let view = repo.view();
@@ -569,26 +691,33 @@ pub fn get_remote_branch_updates(workspace: &jj_lib::workspace::Workspace) -> Re
         let local_commit_id = local_target.as_normal().map(|id| id.hex());
 
         // Determine divergence status
-        let (is_diverged, commits_ahead, commits_behind) = if let (Some(local_target), Some(remote_target)) = (local_target.as_normal(), remote_ref.target.as_normal()) {
-            if local_target.hex() == remote_target.hex() {
-                (false, 0, 0)
-            } else {
-                // Calculate actual commits ahead/behind using commit graph
-                match calculate_ahead_behind(&repo, local_target, remote_target) {
-                    Ok((ahead, behind)) => {
-                        let is_diverged = ahead > 0 && behind > 0;
-                        (is_diverged, ahead, behind)
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to calculate ahead/behind for {}: {}", bookmark_name.as_str(), e);
-                        // Fallback: branches are different but we don't know the count
-                        (true, 0, 0)
+        let (is_diverged, commits_ahead, commits_behind) =
+            if let (Some(local_target), Some(remote_target)) =
+                (local_target.as_normal(), remote_ref.target.as_normal())
+            {
+                if local_target.hex() == remote_target.hex() {
+                    (false, 0, 0)
+                } else {
+                    // Calculate actual commits ahead/behind using commit graph
+                    match calculate_ahead_behind(&repo, local_target, remote_target) {
+                        Ok((ahead, behind)) => {
+                            let is_diverged = ahead > 0 && behind > 0;
+                            (is_diverged, ahead, behind)
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to calculate ahead/behind for {}: {}",
+                                bookmark_name.as_str(),
+                                e
+                            );
+                            // Fallback: branches are different but we don't know the count
+                            (true, 0, 0)
+                        }
                     }
                 }
-            }
-        } else {
-            (false, 0, 0)
-        };
+            } else {
+                (false, 0, 0)
+            };
 
         branches.push(RemoteBranchInfo {
             name: bookmark_name.as_str().to_string(),
@@ -617,8 +746,12 @@ pub struct LocalBranchInfo {
 }
 
 /// Get all local branches
-pub fn get_local_branches(workspace: &jj_lib::workspace::Workspace) -> Result<Vec<LocalBranchInfo>> {
-    let repo = workspace.repo_loader().load_at_head()
+pub fn get_local_branches(
+    workspace: &jj_lib::workspace::Workspace,
+) -> Result<Vec<LocalBranchInfo>> {
+    let repo = workspace
+        .repo_loader()
+        .load_at_head()
         .context("Failed to load repository")?;
 
     let view = repo.view();
@@ -661,8 +794,12 @@ pub fn get_local_branches(workspace: &jj_lib::workspace::Workspace) -> Result<Ve
 }
 
 /// Get all remote-only branches (not present locally)
-pub fn get_remote_only_branches(workspace: &jj_lib::workspace::Workspace) -> Result<Vec<RemoteBranchInfo>> {
-    let repo = workspace.repo_loader().load_at_head()
+pub fn get_remote_only_branches(
+    workspace: &jj_lib::workspace::Workspace,
+) -> Result<Vec<RemoteBranchInfo>> {
+    let repo = workspace
+        .repo_loader()
+        .load_at_head()
         .context("Failed to load repository")?;
 
     let view = repo.view();
@@ -698,10 +835,15 @@ pub fn get_remote_only_branches(workspace: &jj_lib::workspace::Workspace) -> Res
 }
 
 /// Delete a local branch
-pub fn delete_local_branch(workspace: &mut jj_lib::workspace::Workspace, branch_name: &str) -> Result<()> {
+pub fn delete_local_branch(
+    workspace: &mut jj_lib::workspace::Workspace,
+    branch_name: &str,
+) -> Result<()> {
     use jj_lib::op_store::RefTarget;
 
-    let repo = workspace.repo_loader().load_at_head()
+    let repo = workspace
+        .repo_loader()
+        .load_at_head()
         .context("Failed to load repository")?;
 
     // Use branch name as-is (standard Git naming)
@@ -740,26 +882,24 @@ pub fn export_commit_to_dir(
 ) -> Result<()> {
     use jj_lib::backend::CommitId;
 
-    let repo = workspace.repo_loader().load_at_head()
+    let repo = workspace
+        .repo_loader()
+        .load_at_head()
         .context("Failed to load repository")?;
 
     // Parse commit ID from hex (use owned string to avoid lifetime issues)
-    let commit_id = CommitId::new(
-        hex::decode(commit_id_hex).context("Invalid commit hex")?
-    );
+    let commit_id = CommitId::new(hex::decode(commit_id_hex).context("Invalid commit hex")?);
 
-    let commit = repo.store().get_commit(&commit_id)
+    let commit = repo
+        .store()
+        .get_commit(&commit_id)
         .context("Failed to get commit")?;
 
     // Get tree from commit (returns MergedTree directly in 0.36.0)
     let tree = commit.tree();
 
     // Reuse existing export function
-    crate::export::export_jj_tree_to_dir(
-        repo.store(),
-        &tree,
-        target_dir,
-    )?;
+    crate::export::export_jj_tree_to_dir(repo.store(), &tree, target_dir)?;
 
     Ok(())
 }

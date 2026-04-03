@@ -6,17 +6,16 @@
 use crate::locks::RestoreLock;
 use crate::util;
 use anyhow::{anyhow, Context, Result};
-use tl_core::{Entry, Store, Tree};
 use owo_colors::OwoColorize;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use tl_core::{Entry, Store, Tree};
 
 pub async fn run(checkpoint: &str, skip_confirm: bool) -> Result<()> {
     // 1. Find repository root
-    let repo_root = util::find_repo_root()
-        .context("Failed to find repository")?;
+    let repo_root = util::find_repo_root().context("Failed to find repository")?;
 
     let tl_dir = repo_root.join(".tl");
 
@@ -30,13 +29,16 @@ pub async fn run(checkpoint: &str, skip_confirm: bool) -> Result<()> {
     crate::daemon::ensure_daemon_running().await?;
 
     // 3. Resolve checkpoint reference via unified data access layer
-    let ids = crate::data_access::resolve_checkpoint_refs(&[checkpoint.to_string()], &tl_dir).await?;
-    let checkpoint_id = ids[0].ok_or_else(||
-        anyhow!("Checkpoint '{}' not found or ambiguous", checkpoint))?;
+    let ids =
+        crate::data_access::resolve_checkpoint_refs(&[checkpoint.to_string()], &tl_dir).await?;
+    let checkpoint_id =
+        ids[0].ok_or_else(|| anyhow!("Checkpoint '{}' not found or ambiguous", checkpoint))?;
 
     // 4. Get checkpoint via unified data access layer
     let checkpoints = crate::data_access::get_checkpoints(&[checkpoint_id], &tl_dir).await?;
-    let cp = checkpoints[0].as_ref().ok_or_else(|| anyhow!("Checkpoint not found"))?;
+    let cp = checkpoints[0]
+        .as_ref()
+        .ok_or_else(|| anyhow!("Checkpoint not found"))?;
 
     // 5. Open store and load target tree
     let store = Store::open(&repo_root)?;
@@ -47,13 +49,22 @@ pub async fn run(checkpoint: &str, skip_confirm: bool) -> Result<()> {
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!();
     let id_short = checkpoint_id.to_string()[..8].to_string();
-    println!("Checkpoint: {} {}", id_short.yellow(), util::format_relative_time(cp.ts_unix_ms).dimmed());
+    println!(
+        "Checkpoint: {} {}",
+        id_short.yellow(),
+        util::format_relative_time(cp.ts_unix_ms).dimmed()
+    );
     println!("Files:      {}", tree.len());
     println!();
 
     // Conditional confirmation
     if !skip_confirm {
-        println!("{}", "⚠️  Warning: This will overwrite your current working directory!".red().bold());
+        println!(
+            "{}",
+            "⚠️  Warning: This will overwrite your current working directory!"
+                .red()
+                .bold()
+        );
         println!();
 
         print!("Continue? [y/N] ");
@@ -67,7 +78,10 @@ pub async fn run(checkpoint: &str, skip_confirm: bool) -> Result<()> {
             return Ok(());
         }
     } else {
-        println!("{}", "⚠️  Restoring without confirmation (--yes flag)".yellow());
+        println!(
+            "{}",
+            "⚠️  Restoring without confirmation (--yes flag)".yellow()
+        );
     }
 
     println!();
@@ -78,8 +92,7 @@ pub async fn run(checkpoint: &str, skip_confirm: bool) -> Result<()> {
     let mut errors = Vec::new();
 
     for (path_bytes, entry) in tree.entries_with_paths() {
-        let path_str = std::str::from_utf8(path_bytes)
-            .context("Invalid UTF-8 in file path")?;
+        let path_str = std::str::from_utf8(path_bytes).context("Invalid UTF-8 in file path")?;
         let file_path = repo_root.join(path_str);
 
         // Skip if path tries to escape repository or touch protected directories
@@ -112,9 +125,18 @@ pub async fn run(checkpoint: &str, skip_confirm: bool) -> Result<()> {
 
     // 8. Display results
     if errors.is_empty() {
-        println!("{} Restored {} files successfully", "✓".green(), restored.to_string().green());
+        println!(
+            "{} Restored {} files successfully",
+            "✓".green(),
+            restored.to_string().green()
+        );
     } else {
-        println!("{} Restored {} files with {} errors", "⚠".yellow(), restored, errors.len());
+        println!(
+            "{} Restored {} files with {} errors",
+            "⚠".yellow(),
+            restored,
+            errors.len()
+        );
         println!();
         println!("{}", "Errors:".red().bold());
         for error in errors.iter().take(10) {
@@ -131,7 +153,7 @@ pub async fn run(checkpoint: &str, skip_confirm: bool) -> Result<()> {
     // The daemon's in-memory pathmap is now stale because we've modified
     // the working directory. It needs to rebuild from the checkpoint we
     // just restored to (or HEAD) to avoid capturing incorrect changes.
-    let socket_path = tl_dir.join("state/daemon.sock");
+    let socket_path = crate::util::daemon_socket_path(&repo_root)?;
     if socket_path.exists() {
         match crate::ipc::IpcClient::connect(&socket_path).await {
             Ok(mut client) => {
@@ -149,7 +171,11 @@ pub async fn run(checkpoint: &str, skip_confirm: bool) -> Result<()> {
         }
     }
 
-    println!("{}", "Note: The daemon will automatically create a new checkpoint reflecting these changes.".dimmed());
+    println!(
+        "{}",
+        "Note: The daemon will automatically create a new checkpoint reflecting these changes."
+            .dimmed()
+    );
 
     Ok(())
 }
@@ -179,8 +205,9 @@ pub fn restore_file(store: &Store, file_path: &Path, entry: &Entry) -> Result<()
             // Ensure old path doesn't exist; writing a symlink over a file fails.
             let _ = fs::remove_file(file_path);
 
-            let target = std::str::from_utf8(&content)
-                .with_context(|| format!("Invalid UTF-8 in symlink target: {}", file_path.display()))?;
+            let target = std::str::from_utf8(&content).with_context(|| {
+                format!("Invalid UTF-8 in symlink target: {}", file_path.display())
+            })?;
             symlink(target, file_path)
                 .with_context(|| format!("Failed to create symlink: {}", file_path.display()))?;
             return Ok(());
@@ -246,11 +273,16 @@ pub fn restore_tree(
 
         // Skip if path escapes repository or touches protected directories
         if !file_path.starts_with(repo_root) {
-            result.errors.push(format!("Path escapes repository: {}", path_str));
+            result
+                .errors
+                .push(format!("Path escapes repository: {}", path_str));
             continue;
         }
 
-        if path_str.starts_with(".tl/") || path_str.starts_with(".git/") || path_str.starts_with(".jj/") {
+        if path_str.starts_with(".tl/")
+            || path_str.starts_with(".git/")
+            || path_str.starts_with(".jj/")
+        {
             continue;
         }
 
@@ -273,11 +305,9 @@ pub fn restore_tree(
 
         // Report deletion errors
         for (path, err) in delete_result.errors {
-            result.errors.push(format!(
-                "Failed to delete {}: {}",
-                path.display(),
-                err
-            ));
+            result
+                .errors
+                .push(format!("Failed to delete {}: {}", path.display(), err));
         }
     }
 
@@ -295,7 +325,10 @@ pub struct DeleteResult {
 ///
 /// CRITICAL: This function now reports all errors instead of silently ignoring them.
 /// Previously, deletion failures were silently swallowed with `.is_ok()`.
-fn delete_extra_files(repo_root: &Path, keep_paths: &std::collections::HashSet<PathBuf>) -> DeleteResult {
+fn delete_extra_files(
+    repo_root: &Path,
+    keep_paths: &std::collections::HashSet<PathBuf>,
+) -> DeleteResult {
     let mut result = DeleteResult::default();
 
     for entry in walkdir::WalkDir::new(repo_root)
@@ -303,12 +336,12 @@ fn delete_extra_files(repo_root: &Path, keep_paths: &std::collections::HashSet<P
         .filter_entry(|e| {
             let path = e.path();
             // Skip protected directories entirely
-            !path.ends_with(".tl") &&
-            !path.ends_with(".git") &&
-            !path.ends_with(".jj") &&
-            !path.starts_with(repo_root.join(".tl")) &&
-            !path.starts_with(repo_root.join(".git")) &&
-            !path.starts_with(repo_root.join(".jj"))
+            !path.ends_with(".tl")
+                && !path.ends_with(".git")
+                && !path.ends_with(".jj")
+                && !path.starts_with(repo_root.join(".tl"))
+                && !path.starts_with(repo_root.join(".git"))
+                && !path.starts_with(repo_root.join(".jj"))
         })
     {
         let entry = match entry {

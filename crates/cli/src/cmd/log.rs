@@ -2,10 +2,10 @@
 
 use crate::util;
 use anyhow::{Context, Result};
-use tl_core::{Store, TreeDiff};
-use journal::{PinManager, Checkpoint};
+use journal::{Checkpoint, PinManager};
 use owo_colors::OwoColorize;
 use std::collections::HashMap;
+use tl_core::{Store, TreeDiff};
 use ulid::Ulid;
 
 pub struct LogOptions {
@@ -23,13 +23,13 @@ pub async fn run(limit: Option<usize>) -> Result<()> {
         graph: false,
         author_filter: None,
         grep_filter: None,
-    }).await
+    })
+    .await
 }
 
 pub async fn run_with_options(options: LogOptions) -> Result<()> {
     // 1. Find repository root
-    let repo_root = util::find_repo_root()
-        .context("Failed to find repository")?;
+    let repo_root = util::find_repo_root().context("Failed to find repository")?;
 
     let tl_dir = repo_root.join(".tl");
 
@@ -37,9 +37,11 @@ pub async fn run_with_options(options: LogOptions) -> Result<()> {
     crate::daemon::ensure_daemon_running().await?;
 
     // 3. Connect to daemon with retry
-    let socket_path = tl_dir.join("state/daemon.sock");
+    let socket_path = crate::util::daemon_socket_path(&repo_root)?;
     let resilient_client = crate::ipc::ResilientIpcClient::new(socket_path);
-    let mut client = resilient_client.connect_with_retry().await
+    let mut client = resilient_client
+        .connect_with_retry()
+        .await
         .context("Failed to connect to daemon")?;
 
     // 4. Get checkpoint count and list in one IPC call
@@ -49,7 +51,10 @@ pub async fn run_with_options(options: LogOptions) -> Result<()> {
     if checkpoint_count == 0 {
         println!("{}", "No checkpoints yet".dimmed());
         println!();
-        println!("{}", "Tip: Daemon is running and tracking changes automatically".dimmed());
+        println!(
+            "{}",
+            "Tip: Daemon is running and tracking changes automatically".dimmed()
+        );
         return Ok(());
     }
 
@@ -68,9 +73,9 @@ pub async fn run_with_options(options: LogOptions) -> Result<()> {
     if let Some(ref grep_pattern) = options.grep_filter {
         checkpoints.retain(|cp| {
             // Search in touched paths
-            cp.touched_paths.iter().any(|p| {
-                p.to_string_lossy().contains(grep_pattern)
-            })
+            cp.touched_paths
+                .iter()
+                .any(|p| p.to_string_lossy().contains(grep_pattern))
         });
     }
 
@@ -82,7 +87,13 @@ pub async fn run_with_options(options: LogOptions) -> Result<()> {
     } else if options.graph {
         display_graph(&checkpoints, &pins_by_checkpoint, &store);
     } else {
-        display_full(&checkpoints, &pins_by_checkpoint, &store, limit_val, checkpoint_count)?;
+        display_full(
+            &checkpoints,
+            &pins_by_checkpoint,
+            &store,
+            limit_val,
+            checkpoint_count,
+        )?;
     }
 
     Ok(())
@@ -140,7 +151,7 @@ fn display_graph(
         if checkpoint.parent.is_some() {
             print!("│ ");
         } else {
-            print!("* ");  // Root commit
+            print!("* "); // Root commit
         }
 
         print!("{} ", id_short.yellow());
@@ -188,17 +199,13 @@ fn display_full(
             if let Some(prev_cp) = prev_cp {
                 match (
                     store.read_tree(prev_cp.root_tree),
-                    store.read_tree(checkpoint.root_tree)
+                    store.read_tree(checkpoint.root_tree),
                 ) {
                     (Ok(old_tree), Ok(new_tree)) => {
                         let diff = TreeDiff::diff(&old_tree, &new_tree);
-                        Some((
-                            diff.added.len(),
-                            diff.removed.len(),
-                            diff.modified.len()
-                        ))
+                        Some((diff.added.len(), diff.removed.len(), diff.modified.len()))
                     }
-                    _ => None
+                    _ => None,
                 }
             } else {
                 None
@@ -266,7 +273,10 @@ fn display_full(
             }
 
             if checkpoint.touched_paths.len() > 3 {
-                println!("  {}", format!("... and {} more", checkpoint.touched_paths.len() - 3).dimmed());
+                println!(
+                    "  {}",
+                    format!("... and {} more", checkpoint.touched_paths.len() - 3).dimmed()
+                );
             }
         }
 
@@ -277,11 +287,25 @@ fn display_full(
     if checkpoint_count > limit_val {
         println!(
             "{}",
-            format!("Showing {} of {} total checkpoints", limit_val, checkpoint_count).dimmed()
+            format!(
+                "Showing {} of {} total checkpoints",
+                limit_val, checkpoint_count
+            )
+            .dimmed()
         );
-        println!("{}", format!("Use 'tl log --limit {}' to see more", checkpoint_count.min(limit_val * 2)).dimmed());
+        println!(
+            "{}",
+            format!(
+                "Use 'tl log --limit {}' to see more",
+                checkpoint_count.min(limit_val * 2)
+            )
+            .dimmed()
+        );
     } else {
-        println!("{}", format!("Total: {} checkpoints", checkpoint_count).dimmed());
+        println!(
+            "{}",
+            format!("Total: {} checkpoints", checkpoint_count).dimmed()
+        );
     }
 
     Ok(())

@@ -6,24 +6,27 @@
 //! - IPC communication with CLI commands
 
 use crate::ipc::{handle_connection, DaemonStatus, IpcRequest, IpcResponse, IpcServer};
-use crate::locks::{DaemonLock, RestoreLock, GcLock};
+use crate::locks::{DaemonLock, GcLock, RestoreLock};
 use crate::system_config::{self, SystemConfig};
 use crate::util;
 use anyhow::{Context, Result};
-use tl_core::store::Store;
-use tl_core::EntryKind;
-use journal::{incremental_update, Checkpoint, CheckpointMeta, CheckpointReason, GarbageCollector, Journal, PathMap, PinManager};
+use journal::{
+    incremental_update, Checkpoint, CheckpointMeta, CheckpointReason, GarbageCollector, Journal,
+    PathMap, PinManager,
+};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
+use tl_core::store::Store;
+use tl_core::EntryKind;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{broadcast, mpsc, oneshot, RwLock};
 use ulid::Ulid;
-use watcher::Watcher;
 use watcher::ignore::{IgnoreConfig, IgnoreRules};
+use watcher::Watcher;
 
 /// Flush checkpoint request with response channel
 #[derive(Clone, Copy, Debug)]
@@ -48,8 +51,8 @@ impl DaemonSupervisor {
     pub fn new(repo_root: PathBuf) -> Self {
         Self {
             repo_root,
-            max_restarts: 5,                           // Max 5 restarts
-            restart_window: Duration::from_secs(60),   // Within 60s window
+            max_restarts: 5,                         // Max 5 restarts
+            restart_window: Duration::from_secs(60), // Within 60s window
         }
     }
 
@@ -84,7 +87,7 @@ impl DaemonSupervisor {
                 }
                 Err(e) => {
                     // Crash - record and restart
-                    tracing::error!("Daemon crashed: {}", e);
+                    tracing::error!("Daemon crashed: {:#}", e);
                     restart_times.push(Instant::now());
 
                     // Brief delay before restart
@@ -580,7 +583,8 @@ impl Daemon {
         let tl_dir = self.store.tl_dir().to_path_buf();
         let mut pending_paths: HashSet<Arc<Path>> = load_pending_paths(&tl_dir);
         let mut last_checkpoint = Instant::now();
-        let checkpoint_interval = Duration::from_secs(self.system_config.daemon.checkpoint_interval_secs);
+        let checkpoint_interval =
+            Duration::from_secs(self.system_config.daemon.checkpoint_interval_secs);
         let mut last_pending_save = Instant::now();
         let pending_save_interval = Duration::from_secs(2); // Save pending paths every 2s
 
@@ -839,12 +843,8 @@ impl Daemon {
         let (bytes_added, bytes_removed) = self.calculate_bytes_statistics(&paths)?;
 
         // Use incremental update algorithm
-        let (new_map, _tree, tree_hash) = incremental_update(
-            &self.pathmap,
-            paths,
-            self.store.root(),
-            &self.store,
-        )?;
+        let (new_map, _tree, tree_hash) =
+            incremental_update(&self.pathmap, paths, self.store.root(), &self.store)?;
 
         // Get parent checkpoint
         let parent_id = self.journal.latest()?.map(|cp| cp.id);
@@ -875,7 +875,10 @@ impl Daemon {
         self.pathmap = new_map;
 
         // Save pathmap to disk
-        save_pathmap(&self.store.tl_dir().join("state/pathmap.bin"), &self.pathmap)?;
+        save_pathmap(
+            &self.store.tl_dir().join("state/pathmap.bin"),
+            &self.pathmap,
+        )?;
 
         // Mark checkpoint time for watcher overflow recovery
         self.watcher.mark_checkpoint(SystemTime::now());
@@ -899,9 +902,7 @@ impl Daemon {
 
             // Get current file size (0 if deleted/missing)
             let current_size = if full_path.exists() && full_path.is_file() {
-                fs::metadata(&full_path)
-                    .map(|m| m.len())
-                    .unwrap_or(0)
+                fs::metadata(&full_path).map(|m| m.len()).unwrap_or(0)
             } else {
                 0
             };
@@ -962,7 +963,8 @@ impl Daemon {
                 continue;
             }
 
-            let rel_path = entry.path()
+            let rel_path = entry
+                .path()
                 .strip_prefix(repo_root)
                 .context("Failed to relativize reconciliation path")?;
             let rel_path_buf = rel_path.to_path_buf();
@@ -977,9 +979,8 @@ impl Daemon {
                         true
                     } else {
                         let target = std::fs::read_link(entry.path())?;
-                        let target_hash = tl_core::hash::git::hash_blob(
-                            target.to_string_lossy().as_bytes()
-                        );
+                        let target_hash =
+                            tl_core::hash::git::hash_blob(target.to_string_lossy().as_bytes());
                         existing_entry.blob_hash != target_hash
                     }
                 }
@@ -990,12 +991,19 @@ impl Daemon {
                         metadata.mode()
                     };
                     #[cfg(not(unix))]
-                    let mode = if metadata.permissions().readonly() { 0o444 } else { 0o644 };
+                    let mode = if metadata.permissions().readonly() {
+                        0o444
+                    } else {
+                        0o644
+                    };
 
                     let blob_hash = tl_core::hash::hash_file_stable(entry.path(), 3)?;
                     existing_entry.blob_hash != blob_hash
                         || existing_entry.mode != mode
-                        || !matches!(existing_entry.kind, EntryKind::File | EntryKind::ExecutableFile)
+                        || !matches!(
+                            existing_entry.kind,
+                            EntryKind::File | EntryKind::ExecutableFile
+                        )
                 }
                 Some(_) => true,
             };
@@ -1058,8 +1066,7 @@ pub(crate) async fn start_background_internal(repo_root: &Path) -> Result<()> {
         .context("Failed to create logs directory")?;
 
     // Get current executable path
-    let exe = std::env::current_exe()
-        .context("Failed to get current executable path")?;
+    let exe = std::env::current_exe().context("Failed to get current executable path")?;
 
     // Spawn daemon in background with nohup.
     // Append instead of truncating so repeated start attempts don't destroy logs.
@@ -1073,6 +1080,7 @@ pub(crate) async fn start_background_internal(repo_root: &Path) -> Result<()> {
     cmd.arg(&exe)
         .arg("start")
         .arg("--foreground")
+        .current_dir(repo_root)
         .stdout(log_file_writer.try_clone()?)
         .stderr(log_file_writer);
 
@@ -1085,8 +1093,7 @@ pub(crate) async fn start_background_internal(repo_root: &Path) -> Result<()> {
         cmd.env("SSH_AGENT_PID", ssh_agent_pid);
     }
 
-    cmd.spawn()
-        .context("Failed to spawn daemon process")?;
+    cmd.spawn().context("Failed to spawn daemon process")?;
 
     Ok(())
 }
@@ -1118,7 +1125,10 @@ pub async fn ensure_daemon_running_with_timeout(timeout_secs: u64) -> Result<()>
         // Clean it up so a fresh start can proceed.
         if is_unlocked_file(&lock_path).unwrap_or(false) {
             let _ = std::fs::remove_file(&lock_path);
-            let _ = std::fs::remove_file(tl_dir.join("state/daemon.sock"));
+            util::cleanup_legacy_daemon_socket(&tl_dir);
+            if let Ok(socket_path) = util::daemon_socket_path(&repo_root) {
+                let _ = std::fs::remove_file(socket_path);
+            }
         }
     }
 
@@ -1155,8 +1165,8 @@ pub async fn ensure_daemon_running_with_timeout(timeout_secs: u64) -> Result<()>
 fn is_unlocked_file(path: &Path) -> Result<bool> {
     #[cfg(unix)]
     {
-        use std::fs::OpenOptions;
         use nix::fcntl::{flock, FlockArg};
+        use std::fs::OpenOptions;
         use std::os::unix::io::AsRawFd;
 
         let file = match OpenOptions::new().read(true).write(true).open(path) {
@@ -1215,28 +1225,23 @@ async fn start_daemon_direct(repo_root: &Path) -> Result<()> {
     }
 
     // 3. Acquire daemon lock
-    let lock = DaemonLock::acquire(&tl_dir)
-        .context("Failed to acquire daemon lock")?;
+    let lock = DaemonLock::acquire(&tl_dir).context("Failed to acquire daemon lock")?;
 
     // 4. Initialize components
-    let store = Arc::new(
-        Store::open(&repo_root).context("Failed to open store")?,
-    );
-    let journal = Arc::new(
-        Journal::open(&tl_dir.join("journal")).context("Failed to open journal")?,
-    );
+    let store = Arc::new(Store::open(&repo_root).context("Failed to open store")?);
+    let journal =
+        Arc::new(Journal::open(&tl_dir.join("journal")).context("Failed to open journal")?);
 
     // Load or create initial pathmap
     let pathmap = load_or_create_pathmap(&tl_dir, &journal)?;
 
     // 5. Initialize watcher
-    let mut watcher = Watcher::new(&repo_root)
-        .context("Failed to create watcher")?;
+    let mut watcher = Watcher::new(&repo_root).context("Failed to create watcher")?;
     watcher.start().await.context("Failed to start watcher")?;
 
     // 6. Create daemon status and channels
     let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
-    let (flush_tx, flush_rx) = mpsc::channel(10);  // Buffer up to 10 flush requests
+    let (flush_tx, flush_rx) = mpsc::channel(10); // Buffer up to 10 flush requests
 
     let start_time_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1258,11 +1263,13 @@ async fn start_daemon_direct(repo_root: &Path) -> Result<()> {
     let checkpoint_count_cache = Arc::new(AtomicUsize::new(initial_count));
 
     // 7. Start IPC server
-    let socket_path = tl_dir.join("state/daemon.sock");
+    util::cleanup_legacy_daemon_socket(&tl_dir);
+    let socket_path = util::daemon_socket_path(repo_root)?;
+    tracing::debug!("Starting daemon IPC server at {}", socket_path.display());
     let ipc_server = Arc::new(
         IpcServer::start(&socket_path)
             .await
-            .context("Failed to start IPC server")?
+            .context("Failed to start IPC server")?,
     );
 
     // 8. Create and run daemon
@@ -1291,10 +1298,11 @@ async fn start_daemon_direct(repo_root: &Path) -> Result<()> {
 pub async fn stop() -> Result<()> {
     let repo_root = util::find_repo_root()?;
     let tl_dir = repo_root.join(".tl");
-    let socket_path = repo_root.join(".tl/state/daemon.sock");
+    let socket_path = util::daemon_socket_path(&repo_root)?;
 
     // Check if daemon is running
     if !socket_path.exists() {
+        util::cleanup_legacy_daemon_socket(&tl_dir);
         println!("Daemon is not running");
         return Ok(());
     }
@@ -1309,6 +1317,7 @@ pub async fn stop() -> Result<()> {
             let lock_path = tl_dir.join("locks/daemon.lock");
             if is_stale_daemon_lock(&lock_path) {
                 let _ = std::fs::remove_file(&socket_path);
+                util::cleanup_legacy_daemon_socket(&tl_dir);
                 let _ = std::fs::remove_file(&lock_path);
                 println!("Daemon is not running");
                 return Ok(());
@@ -1383,9 +1392,17 @@ pub async fn is_running() -> bool {
 }
 
 async fn is_running_impl(tl_dir: &Path) -> bool {
+    let repo_root = match tl_dir.parent() {
+        Some(path) => path,
+        None => return false,
+    };
+
     // Check both lock file and socket
     let lock_path = tl_dir.join("locks/daemon.lock");
-    let socket_path = tl_dir.join("state/daemon.sock");
+    let socket_path = match util::daemon_socket_path(repo_root) {
+        Ok(path) => path,
+        Err(_) => return false,
+    };
 
     if !lock_path.exists() || !socket_path.exists() {
         return false;
@@ -1394,14 +1411,21 @@ async fn is_running_impl(tl_dir: &Path) -> bool {
     // Verify IPC by sending a real request with a short timeout.
     // This keeps `ensure_daemon_running()` bounded even if the socket exists
     // but the daemon is wedged or restarting.
-    let connect = tokio::time::timeout(Duration::from_millis(200), crate::ipc::IpcClient::connect(&socket_path)).await;
+    let connect = tokio::time::timeout(
+        Duration::from_millis(200),
+        crate::ipc::IpcClient::connect(&socket_path),
+    )
+    .await;
     let mut client = match connect {
         Ok(Ok(c)) => c,
         _ => return false,
     };
 
     match client
-        .send_request_with_timeout(&crate::ipc::IpcRequest::GetStatus, Duration::from_millis(200))
+        .send_request_with_timeout(
+            &crate::ipc::IpcRequest::GetStatus,
+            Duration::from_millis(200),
+        )
         .await
     {
         Ok(crate::ipc::IpcResponse::Status(_)) => true,
@@ -1449,9 +1473,7 @@ fn save_pathmap(path: &Path, pathmap: &PathMap) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
 
-    pathmap
-        .save(path)
-        .context("Failed to save pathmap")?;
+    pathmap.save(path).context("Failed to save pathmap")?;
 
     Ok(())
 }
@@ -1527,25 +1549,26 @@ fn load_pending_paths(tl_dir: &Path) -> HashSet<Arc<Path>> {
     }
 
     match std::fs::read_to_string(&file_path) {
-        Ok(json) => {
-            match serde_json::from_str::<Vec<String>>(&json) {
-                Ok(paths_vec) => {
-                    let paths: HashSet<Arc<Path>> = paths_vec
-                        .into_iter()
-                        .map(|s| Arc::from(PathBuf::from(s).as_path()))
-                        .collect();
+        Ok(json) => match serde_json::from_str::<Vec<String>>(&json) {
+            Ok(paths_vec) => {
+                let paths: HashSet<Arc<Path>> = paths_vec
+                    .into_iter()
+                    .map(|s| Arc::from(PathBuf::from(s).as_path()))
+                    .collect();
 
-                    if !paths.is_empty() {
-                        tracing::info!("Recovered {} pending paths from previous crash", paths.len());
-                    }
-                    paths
+                if !paths.is_empty() {
+                    tracing::info!(
+                        "Recovered {} pending paths from previous crash",
+                        paths.len()
+                    );
                 }
-                Err(e) => {
-                    tracing::warn!("Failed to parse pending paths: {}", e);
-                    HashSet::new()
-                }
+                paths
             }
-        }
+            Err(e) => {
+                tracing::warn!("Failed to parse pending paths: {}", e);
+                HashSet::new()
+            }
+        },
         Err(e) => {
             tracing::warn!("Failed to read pending paths file: {}", e);
             HashSet::new()
@@ -1571,15 +1594,11 @@ fn clear_pending_paths(tl_dir: &Path) {
 /// the in-memory pathmap becomes stale. This function rebuilds it from
 /// the HEAD checkpoint's tree to ensure subsequent checkpoints correctly
 /// capture only actual changes.
-fn rebuild_pathmap_from_head(
-    tl_dir: &Path,
-    journal: &Journal,
-    store: &Store,
-) -> Result<PathMap> {
+fn rebuild_pathmap_from_head(tl_dir: &Path, journal: &Journal, store: &Store) -> Result<PathMap> {
     // Get latest checkpoint
-    let head = journal.latest()?.ok_or_else(|| {
-        anyhow::anyhow!("No checkpoint exists - cannot rebuild pathmap")
-    })?;
+    let head = journal
+        .latest()?
+        .ok_or_else(|| anyhow::anyhow!("No checkpoint exists - cannot rebuild pathmap"))?;
 
     // Load the tree for HEAD checkpoint
     let tree = store.read_tree(head.root_tree)?;
@@ -1632,8 +1651,7 @@ async fn run_auto_gc(
 
     // Open journal with write access (we hold the GC lock, so this is safe)
     let journal_path = tl_dir.join("journal");
-    let journal = Journal::open(&journal_path)
-        .context("Failed to open journal for auto-GC")?;
+    let journal = Journal::open(&journal_path).context("Failed to open journal for auto-GC")?;
 
     // Collect workspace checkpoints for protection
     let workspace_checkpoints = collect_workspace_checkpoints(tl_dir, store.root())?;
@@ -1648,7 +1666,12 @@ async fn run_auto_gc(
     // Run GC
     // Note: GC is a blocking operation. In practice, it should complete in seconds,
     // but we monitor via logging. The checkpoint pause is inherent to the safety model.
-    let metrics = gc.collect(&journal, store, &pin_manager, workspace_checkpoints.as_ref())?;
+    let metrics = gc.collect(
+        &journal,
+        store,
+        &pin_manager,
+        workspace_checkpoints.as_ref(),
+    )?;
 
     // Update checkpoint count cache
     let new_count = journal.count();

@@ -1,0 +1,162 @@
+{
+  "meta": {
+    "timestamp": "2026-04-03T15:48:54.262424+00:00",
+    "repo": "saint0x/tl-headline-bench-20260403t154723z",
+    "remote_url": "https://github.com/saint0x/tl-headline-bench-20260403t154723z.git",
+    "tl_bin": "/Users/deepsaint/Desktop/timelapse/target/aarch64-apple-darwin/release/tl",
+    "init_reps": 3,
+    "network_reps": 3
+  },
+  "results": {
+    "tl_init": {
+      "n": 3,
+      "min_ms": 383.8,
+      "mean_ms": 384.6,
+      "p50_ms": 384.8,
+      "p90_ms": 385.1,
+      "p99_ms": 385.1,
+      "max_ms": 385.1,
+      "ops_per_sec": 2.6,
+      "samples_ms": [
+        383.8,
+        384.8,
+        385.1
+      ]
+    },
+    "git_init": {
+      "n": 3,
+      "min_ms": 55.9,
+      "mean_ms": 56.7,
+      "p50_ms": 56.6,
+      "p90_ms": 57.3,
+      "p99_ms": 57.5,
+      "max_ms": 57.5,
+      "ops_per_sec": 17.645,
+      "samples_ms": [
+        55.9,
+        56.6,
+        57.5
+      ]
+    },
+    "tl_fetch_no_sync": {
+      "n": 3,
+      "min_ms": 2478.5,
+      "mean_ms": 2520.5,
+      "p50_ms": 2508.0,
+      "p90_ms": 2561.7,
+      "p99_ms": 2573.8,
+      "max_ms": 2575.1,
+      "ops_per_sec": 0.397,
+      "samples_ms": [
+        2478.5,
+        2508.0,
+        2575.1
+      ]
+    },
+    "git_fetch_origin": {
+      "n": 3,
+      "min_ms": 2086.6,
+      "mean_ms": 2127.4,
+      "p50_ms": 2095.0,
+      "p90_ms": 2179.4,
+      "p99_ms": 2198.4,
+      "max_ms": 2200.5,
+      "ops_per_sec": 0.47,
+      "samples_ms": [
+        2086.6,
+        2095.0,
+        2200.5
+      ]
+    },
+    "tl_pull_fetch_only": {
+      "n": 3,
+      "min_ms": 3041.3,
+      "mean_ms": 3316.7,
+      "p50_ms": 3391.5,
+      "p90_ms": 3492.3,
+      "p99_ms": 3514.9,
+      "max_ms": 3517.4,
+      "ops_per_sec": 0.302,
+      "samples_ms": [
+        3041.3,
+        3391.5,
+        3517.4
+      ]
+    },
+    "git_fetch_origin_2": {
+      "n": 3,
+      "min_ms": 2167.5,
+      "mean_ms": 2499.4,
+      "p50_ms": 2436.8,
+      "p90_ms": 2802.6,
+      "p99_ms": 2884.9,
+      "max_ms": 2894.1,
+      "ops_per_sec": 0.4,
+      "samples_ms": [
+        2167.5,
+        2436.8,
+        2894.1
+      ]
+    },
+    "tl_pull": {
+      "n": 3,
+      "min_ms": 6868.4,
+      "mean_ms": 6915.2,
+      "p50_ms": 6885.1,
+      "p90_ms": 6970.7,
+      "p99_ms": 6989.9,
+      "max_ms": 6992.1,
+      "ops_per_sec": 0.145,
+      "samples_ms": [
+        6868.4,
+        6885.1,
+        6992.1
+      ]
+    },
+    "git_pull": {
+      "n": 3,
+      "min_ms": 5026.0,
+      "mean_ms": 5184.3,
+      "p50_ms": 5240.3,
+      "p90_ms": 5277.3,
+      "p99_ms": 5285.7,
+      "max_ms": 5286.6,
+      "ops_per_sec": 0.193,
+      "samples_ms": [
+        5026.0,
+        5240.3,
+        5286.6
+      ]
+    },
+    "tl_push": {
+      "n": 3,
+      "min_ms": 3311.2,
+      "mean_ms": 3494.0,
+      "p50_ms": 3539.4,
+      "p90_ms": 3612.9,
+      "p99_ms": 3629.5,
+      "max_ms": 3631.3,
+      "ops_per_sec": 0.286,
+      "samples_ms": [
+        3311.2,
+        3539.4,
+        3631.3
+      ]
+    },
+    "git_push": {
+      "n": 3,
+      "min_ms": 2369.6,
+      "mean_ms": 2418.9,
+      "p50_ms": 2400.8,
+      "p90_ms": 2469.2,
+      "p99_ms": 2484.6,
+      "max_ms": 2486.4,
+      "ops_per_sec": 0.413,
+      "samples_ms": [
+        2369.6,
+        2400.8,
+        2486.4
+      ]
+    }
+  }
+}

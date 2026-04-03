@@ -58,10 +58,7 @@ pub enum IpcRequest {
     ///
     /// This must run in the daemon process because the journal is sled-backed
     /// and is not safe to open concurrently from multiple processes.
-    ImportRemoteCommit {
-        commit_id: String,
-        no_pin: bool,
-    },
+    ImportRemoteCommit { commit_id: String, no_pin: bool },
 }
 
 /// IPC response from daemon to CLI
@@ -147,7 +144,8 @@ impl IpcClient {
 
     /// Send request and receive response
     pub async fn send_request(&mut self, request: &IpcRequest) -> Result<IpcResponse> {
-        self.send_request_with_timeout(request, Duration::from_secs(5)).await
+        self.send_request_with_timeout(request, Duration::from_secs(5))
+            .await
     }
 
     /// Send request with a custom timeout.
@@ -180,7 +178,10 @@ impl IpcClient {
                 .await
                 .context("Failed to write request payload")?;
 
-            self.stream.flush().await.context("Failed to flush request")?;
+            self.stream
+                .flush()
+                .await
+                .context("Failed to flush request")?;
 
             // Read response length
             let mut len_buf = [0u8; 4];
@@ -203,8 +204,8 @@ impl IpcClient {
                 .context("Failed to read response payload")?;
 
             // Deserialize response
-            let response: IpcResponse =
-                bincode::deserialize(&response_payload).context("Failed to deserialize response")?;
+            let response: IpcResponse = bincode::deserialize(&response_payload)
+                .context("Failed to deserialize response")?;
 
             Ok(response)
         };
@@ -285,7 +286,11 @@ impl IpcClient {
     }
 
     /// Get checkpoints with pagination (for log command)
-    pub async fn get_checkpoints(&mut self, limit: Option<usize>, offset: Option<usize>) -> Result<Vec<Checkpoint>> {
+    pub async fn get_checkpoints(
+        &mut self,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> Result<Vec<Checkpoint>> {
         let request = IpcRequest::GetCheckpoints { limit, offset };
         match self.send_request(&request).await? {
             IpcResponse::Checkpoints(checkpoints) => Ok(checkpoints),
@@ -304,8 +309,14 @@ impl IpcClient {
     }
 
     /// Get multiple checkpoints in one IPC call (for diff command)
-    pub async fn get_checkpoint_batch(&mut self, ids: Vec<String>) -> Result<Vec<Option<Checkpoint>>> {
-        match self.send_request(&IpcRequest::GetCheckpointBatch(ids)).await? {
+    pub async fn get_checkpoint_batch(
+        &mut self,
+        ids: Vec<String>,
+    ) -> Result<Vec<Option<Checkpoint>>> {
+        match self
+            .send_request(&IpcRequest::GetCheckpointBatch(ids))
+            .await?
+        {
             IpcResponse::CheckpointBatch(checkpoints) => Ok(checkpoints),
             IpcResponse::Error(err) => anyhow::bail!("Daemon error: {}", err),
             _ => anyhow::bail!("Unexpected response to GetCheckpointBatch"),
@@ -315,16 +326,22 @@ impl IpcClient {
     /// Get full status information in one IPC call (for status command)
     pub async fn get_status_full(&mut self) -> Result<(DaemonStatus, Option<Checkpoint>, usize)> {
         match self.send_request(&IpcRequest::GetStatusFull).await? {
-            IpcResponse::StatusFull { status, head, checkpoint_count } => {
-                Ok((status, head, checkpoint_count))
-            }
+            IpcResponse::StatusFull {
+                status,
+                head,
+                checkpoint_count,
+            } => Ok((status, head, checkpoint_count)),
             IpcResponse::Error(err) => anyhow::bail!("Daemon error: {}", err),
             _ => anyhow::bail!("Unexpected response to GetStatusFull"),
         }
     }
 
     /// Get checkpoint count and list in one IPC call (for log command)
-    pub async fn get_log_data(&mut self, limit: Option<usize>, offset: Option<usize>) -> Result<(usize, Vec<Checkpoint>)> {
+    pub async fn get_log_data(
+        &mut self,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> Result<(usize, Vec<Checkpoint>)> {
         let request = IpcRequest::GetLogData { limit, offset };
         match self.send_request(&request).await? {
             IpcResponse::LogData { count, checkpoints } => Ok((count, checkpoints)),
@@ -334,7 +351,10 @@ impl IpcClient {
     }
 
     /// Resolve checkpoint references (supports full IDs, short prefixes, pin names)
-    pub async fn resolve_checkpoint_refs(&mut self, refs: Vec<String>) -> Result<Vec<Option<Checkpoint>>> {
+    pub async fn resolve_checkpoint_refs(
+        &mut self,
+        refs: Vec<String>,
+    ) -> Result<Vec<Option<Checkpoint>>> {
         let request = IpcRequest::ResolveCheckpointRefs(refs);
         match self.send_request(&request).await? {
             IpcResponse::ResolvedCheckpoints(checkpoints) => Ok(checkpoints),
@@ -347,9 +367,11 @@ impl IpcClient {
     pub async fn get_info_data(&mut self) -> Result<(usize, Vec<String>, u64)> {
         let request = IpcRequest::GetInfoData;
         match self.send_request(&request).await? {
-            IpcResponse::InfoData { total_checkpoints, checkpoint_ids, store_size_bytes } => {
-                Ok((total_checkpoints, checkpoint_ids, store_size_bytes))
-            }
+            IpcResponse::InfoData {
+                total_checkpoints,
+                checkpoint_ids,
+                store_size_bytes,
+            } => Ok((total_checkpoints, checkpoint_ids, store_size_bytes)),
             IpcResponse::Error(err) => anyhow::bail!("Daemon error: {}", err),
             _ => anyhow::bail!("Unexpected response to GetInfoData"),
         }
@@ -412,7 +434,10 @@ impl ResilientIpcClient {
     /// Send request with automatic reconnect on failure
     pub async fn send_request_resilient(&self, request: &IpcRequest) -> Result<IpcResponse> {
         fn is_transient(err: &anyhow::Error) -> bool {
-            if err.chain().any(|c| c.downcast_ref::<tokio::time::error::Elapsed>().is_some()) {
+            if err
+                .chain()
+                .any(|c| c.downcast_ref::<tokio::time::error::Elapsed>().is_some())
+            {
                 return true;
             }
             // Retry common transient IO failures (daemon restarting, socket churn, etc.)
@@ -421,7 +446,12 @@ impl ResilientIpcClient {
                     use std::io::ErrorKind::*;
                     return matches!(
                         ioe.kind(),
-                        BrokenPipe | ConnectionReset | ConnectionAborted | NotConnected | UnexpectedEof | TimedOut
+                        BrokenPipe
+                            | ConnectionReset
+                            | ConnectionAborted
+                            | NotConnected
+                            | UnexpectedEof
+                            | TimedOut
                     );
                 }
             }
@@ -464,21 +494,36 @@ pub struct IpcServer {
 impl IpcServer {
     /// Start IPC server on Unix socket
     pub async fn start(socket_path: &Path) -> Result<Self> {
-        // Remove stale socket if exists
-        if socket_path.exists() {
-            std::fs::remove_file(socket_path)
-                .context("Failed to remove stale socket")?;
-        }
-
         // Ensure parent directory exists
         if let Some(parent) = socket_path.parent() {
-            std::fs::create_dir_all(parent)
-                .context("Failed to create socket directory")?;
+            std::fs::create_dir_all(parent).context("Failed to create socket directory")?;
         }
 
-        // Bind Unix socket
-        let listener = UnixListener::bind(socket_path)
-            .context("Failed to bind Unix socket")?;
+        if socket_path.exists() {
+            if socket_accepts_connections(socket_path).await {
+                anyhow::bail!(
+                    "Refusing to replace a live daemon socket at {}",
+                    socket_path.display()
+                );
+            }
+
+            std::fs::remove_file(socket_path).context("Failed to remove stale socket")?;
+        }
+
+        let listener = match UnixListener::bind(socket_path) {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
+                if socket_accepts_connections(socket_path).await {
+                    return Err(err).context("Daemon socket already in use");
+                }
+
+                std::fs::remove_file(socket_path)
+                    .context("Failed to remove stale socket after AddrInUse")?;
+                UnixListener::bind(socket_path)
+                    .context("Failed to bind Unix socket after stale socket cleanup")?
+            }
+            Err(err) => return Err(err).context("Failed to bind Unix socket"),
+        };
 
         // Set socket permissions to owner-only (0600)
         #[cfg(unix)]
@@ -501,6 +546,12 @@ impl IpcServer {
             .context("Failed to accept connection")?;
         Ok(stream)
     }
+}
+
+async fn socket_accepts_connections(socket_path: &Path) -> bool {
+    tokio::time::timeout(Duration::from_millis(200), UnixStream::connect(socket_path))
+        .await
+        .is_ok_and(|result| result.is_ok())
 }
 
 /// Handle a single IPC connection
@@ -536,15 +587,14 @@ where
         .context("Failed to read request payload")?;
 
     // Deserialize request
-    let request: IpcRequest = bincode::deserialize(&payload)
-        .context("Failed to deserialize request")?;
+    let request: IpcRequest =
+        bincode::deserialize(&payload).context("Failed to deserialize request")?;
 
     // Process request
     let response = handler(request).await?;
 
     // Serialize response
-    let response_bytes = bincode::serialize(&response)
-        .context("Failed to serialize response")?;
+    let response_bytes = bincode::serialize(&response).context("Failed to serialize response")?;
 
     if response_bytes.len() > MAX_MESSAGE_SIZE {
         anyhow::bail!("Response too large: {} bytes", response_bytes.len());
@@ -563,10 +613,7 @@ where
         .await
         .context("Failed to write response payload")?;
 
-    stream
-        .flush()
-        .await
-        .context("Failed to flush response")?;
+    stream.flush().await.context("Failed to flush response")?;
 
     Ok(())
 }
@@ -606,5 +653,36 @@ mod tests {
         } else {
             panic!("Expected Status response");
         }
+    }
+
+    #[tokio::test]
+    async fn test_ipc_server_replaces_stale_socket() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let socket_path = temp_dir.path().join("daemon.sock");
+
+        {
+            let _listener = UnixListener::bind(&socket_path).unwrap();
+        }
+
+        let server = IpcServer::start(&socket_path).await.unwrap();
+        drop(server);
+        assert!(socket_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_ipc_server_keeps_live_socket() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let socket_path = temp_dir.path().join("daemon.sock");
+        let _listener = UnixListener::bind(&socket_path).unwrap();
+
+        let err = match IpcServer::start(&socket_path).await {
+            Ok(_) => panic!("starting on a live socket should fail"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("already in use")
+                || err.to_string().contains("live daemon socket")
+        );
+        assert!(socket_path.exists());
     }
 }

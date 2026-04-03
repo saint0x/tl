@@ -3,12 +3,12 @@
 //! Implements Git-style stash operations using Timelapse checkpoints and pins.
 //! Stashes are stored as pinned checkpoints with a special "stash/" prefix.
 
-use crate::util;
 use crate::data_access;
+use crate::util;
 use anyhow::{Context, Result};
+use journal::{Checkpoint, PinManager};
 use owo_colors::OwoColorize;
 use tl_core::store::Store;
-use journal::{Checkpoint, PinManager};
 use ulid::Ulid;
 
 /// List all stashes
@@ -24,7 +24,8 @@ pub async fn run_list() -> Result<()> {
     let all_pins = pins.list_pins()?;
 
     // Filter stash pins (those starting with "stash/")
-    let mut stashes: Vec<(String, Ulid)> = all_pins.into_iter()
+    let mut stashes: Vec<(String, Ulid)> = all_pins
+        .into_iter()
         .filter(|(name, _)| name.starts_with("stash/"))
         .collect();
 
@@ -38,11 +39,11 @@ pub async fn run_list() -> Result<()> {
     let checkpoints = data_access::get_checkpoints(&checkpoint_ids, &tl_dir).await?;
 
     // Build map of id -> checkpoint
-    let checkpoint_map: std::collections::HashMap<Ulid, Option<Checkpoint>> =
-        stashes.iter()
-            .map(|(_, id)| *id)
-            .zip(checkpoints.into_iter())
-            .collect();
+    let checkpoint_map: std::collections::HashMap<Ulid, Option<Checkpoint>> = stashes
+        .iter()
+        .map(|(_, id)| *id)
+        .zip(checkpoints.into_iter())
+        .collect();
 
     // Sort by checkpoint timestamp (newest first)
     stashes.sort_by(|(_, id_a), (_, id_b)| {
@@ -57,7 +58,8 @@ pub async fn run_list() -> Result<()> {
 
     println!("{}", "Stashes:".bold());
     for (index, (name, checkpoint_id)) in stashes.iter().enumerate() {
-        let checkpoint = checkpoint_map.get(checkpoint_id)
+        let checkpoint = checkpoint_map
+            .get(checkpoint_id)
             .and_then(|o| o.as_ref())
             .context("Stash checkpoint not found")?;
 
@@ -75,7 +77,9 @@ pub async fn run_list() -> Result<()> {
         // Show first few changed files
         if !checkpoint.touched_paths.is_empty() {
             let file_count = checkpoint.touched_paths.len();
-            let sample = checkpoint.touched_paths.iter()
+            let sample = checkpoint
+                .touched_paths
+                .iter()
                 .take(3)
                 .map(|p| p.display().to_string())
                 .collect::<Vec<_>>()
@@ -118,7 +122,7 @@ pub async fn run_push(message: Option<String>, include_untracked: bool) -> Resul
     let pins = PinManager::new(&tl_dir);
 
     // Create a manual checkpoint to capture current state via IPC
-    let socket_path = tl_dir.join("state/daemon.sock");
+    let socket_path = crate::util::daemon_socket_path(&repo_root)?;
     let mut client = crate::ipc::IpcClient::connect(&socket_path)
         .await
         .context("Failed to connect to daemon")?;
@@ -141,7 +145,11 @@ pub async fn run_push(message: Option<String>, include_untracked: bool) -> Resul
 
     pins.pin(&stash_name, checkpoint_id)?;
 
-    println!("{} Saved working directory to {}", "✓".green(), stash_name.cyan());
+    println!(
+        "{} Saved working directory to {}",
+        "✓".green(),
+        stash_name.cyan()
+    );
 
     // Get checkpoint info via data_access
     let checkpoints = data_access::get_checkpoints(&[checkpoint_id], &tl_dir).await?;
@@ -169,7 +177,8 @@ pub async fn run_apply(stash_ref: Option<String>, pop: bool) -> Result<()> {
 
     // Get all stash pins
     let all_pins = pins.list_pins()?;
-    let mut stashes: Vec<(String, Ulid)> = all_pins.into_iter()
+    let mut stashes: Vec<(String, Ulid)> = all_pins
+        .into_iter()
         .filter(|(name, _)| name.starts_with("stash/"))
         .collect();
 
@@ -181,11 +190,11 @@ pub async fn run_apply(stash_ref: Option<String>, pop: bool) -> Result<()> {
     let checkpoint_ids: Vec<Ulid> = stashes.iter().map(|(_, id)| *id).collect();
     let checkpoints = data_access::get_checkpoints(&checkpoint_ids, &tl_dir).await?;
 
-    let checkpoint_map: std::collections::HashMap<Ulid, Option<Checkpoint>> =
-        stashes.iter()
-            .map(|(_, id)| *id)
-            .zip(checkpoints.into_iter())
-            .collect();
+    let checkpoint_map: std::collections::HashMap<Ulid, Option<Checkpoint>> = stashes
+        .iter()
+        .map(|(_, id)| *id)
+        .zip(checkpoints.into_iter())
+        .collect();
 
     // Sort by checkpoint timestamp (newest first)
     stashes.sort_by(|(_, id_a), (_, id_b)| {
@@ -209,7 +218,8 @@ pub async fn run_apply(stash_ref: Option<String>, pop: bool) -> Result<()> {
                 .parse()
                 .context("Invalid stash index")?;
 
-            stashes.get(index)
+            stashes
+                .get(index)
                 .map(|(name, _)| name.clone())
                 .ok_or_else(|| anyhow::anyhow!("Stash index {} not found", index))?
         } else if ref_str.starts_with("stash/") {
@@ -223,7 +233,8 @@ pub async fn run_apply(stash_ref: Option<String>, pop: bool) -> Result<()> {
     };
 
     // Get stash checkpoint
-    let checkpoint_id = stashes.iter()
+    let checkpoint_id = stashes
+        .iter()
         .find(|(name, _)| name == &stash_name)
         .map(|(_, id)| *id)
         .ok_or_else(|| anyhow::anyhow!("Stash not found: {}", stash_name))?;
@@ -234,10 +245,17 @@ pub async fn run_apply(stash_ref: Option<String>, pop: bool) -> Result<()> {
     if pop {
         // Remove the stash
         pins.unpin(&stash_name)?;
-        println!("{} Applied and dropped stash: {}", "✓".green(), stash_name.cyan());
+        println!(
+            "{} Applied and dropped stash: {}",
+            "✓".green(),
+            stash_name.cyan()
+        );
     } else {
         println!("{} Applied stash: {}", "✓".green(), stash_name.cyan());
-        println!("{}", "  (stash still exists, use 'tl stash drop' to remove)".dimmed());
+        println!(
+            "{}",
+            "  (stash still exists, use 'tl stash drop' to remove)".dimmed()
+        );
     }
 
     Ok(())
@@ -255,7 +273,8 @@ pub async fn run_drop(stash_ref: Option<String>) -> Result<()> {
 
     // Get all stash pins
     let all_pins = pins.list_pins()?;
-    let mut stashes: Vec<(String, Ulid)> = all_pins.into_iter()
+    let mut stashes: Vec<(String, Ulid)> = all_pins
+        .into_iter()
         .filter(|(name, _)| name.starts_with("stash/"))
         .collect();
 
@@ -267,11 +286,11 @@ pub async fn run_drop(stash_ref: Option<String>) -> Result<()> {
     let checkpoint_ids: Vec<Ulid> = stashes.iter().map(|(_, id)| *id).collect();
     let checkpoints = data_access::get_checkpoints(&checkpoint_ids, &tl_dir).await?;
 
-    let checkpoint_map: std::collections::HashMap<Ulid, Option<Checkpoint>> =
-        stashes.iter()
-            .map(|(_, id)| *id)
-            .zip(checkpoints.into_iter())
-            .collect();
+    let checkpoint_map: std::collections::HashMap<Ulid, Option<Checkpoint>> = stashes
+        .iter()
+        .map(|(_, id)| *id)
+        .zip(checkpoints.into_iter())
+        .collect();
 
     // Sort by checkpoint timestamp (newest first)
     stashes.sort_by(|(_, id_a), (_, id_b)| {
@@ -293,7 +312,8 @@ pub async fn run_drop(stash_ref: Option<String>) -> Result<()> {
                 .parse()
                 .context("Invalid stash index")?;
 
-            stashes.get(index)
+            stashes
+                .get(index)
                 .map(|(name, _)| name.clone())
                 .ok_or_else(|| anyhow::anyhow!("Stash index {} not found", index))?
         } else if ref_str.starts_with("stash/") {
@@ -302,7 +322,8 @@ pub async fn run_drop(stash_ref: Option<String>) -> Result<()> {
             format!("stash/{}", ref_str)
         }
     } else {
-        stashes.get(0)
+        stashes
+            .get(0)
             .map(|(name, _)| name.clone())
             .ok_or_else(|| anyhow::anyhow!("No stashes found"))?
     };
@@ -324,7 +345,8 @@ pub async fn run_clear(yes: bool) -> Result<()> {
 
     // Get all stash pins
     let all_pins = pins.list_pins()?;
-    let stashes: Vec<String> = all_pins.into_iter()
+    let stashes: Vec<String> = all_pins
+        .into_iter()
         .filter(|(name, _)| name.starts_with("stash/"))
         .map(|(name, _)| name)
         .collect();
@@ -336,7 +358,10 @@ pub async fn run_clear(yes: bool) -> Result<()> {
 
     // Confirm unless -y flag is provided
     if !yes {
-        println!("{}", format!("About to delete {} stashes", stashes.len()).yellow());
+        println!(
+            "{}",
+            format!("About to delete {} stashes", stashes.len()).yellow()
+        );
         println!("{}", "Use -y to confirm, or Ctrl+C to cancel".dimmed());
         anyhow::bail!("Confirmation required");
     }

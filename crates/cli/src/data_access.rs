@@ -14,10 +14,7 @@ use ulid::Ulid;
 /// - Pin names
 ///
 /// Returns Ulid for each reference. Returns None if not found or ambiguous.
-pub async fn resolve_checkpoint_refs(
-    refs: &[String],
-    tl_dir: &Path,
-) -> Result<Vec<Option<Ulid>>> {
+pub async fn resolve_checkpoint_refs(refs: &[String], tl_dir: &Path) -> Result<Vec<Option<Ulid>>> {
     // Try IPC first (daemon running)
     if let Ok(Some(ids)) = try_resolve_via_ipc(refs, tl_dir).await {
         return Ok(ids);
@@ -28,10 +25,7 @@ pub async fn resolve_checkpoint_refs(
 }
 
 /// Get checkpoint data - uses IPC first, falls back to direct access
-pub async fn get_checkpoints(
-    ids: &[Ulid],
-    tl_dir: &Path,
-) -> Result<Vec<Option<Checkpoint>>> {
+pub async fn get_checkpoints(ids: &[Ulid], tl_dir: &Path) -> Result<Vec<Option<Checkpoint>>> {
     // Try IPC first
     if let Ok(Some(checkpoints)) = try_get_via_ipc(ids, tl_dir).await {
         return Ok(checkpoints);
@@ -44,9 +38,7 @@ pub async fn get_checkpoints(
 /// Get repository info - uses IPC first, falls back to direct access
 ///
 /// Returns (total_checkpoints, checkpoint_ids, store_size_bytes)
-pub async fn get_info_data(
-    tl_dir: &Path,
-) -> Result<(usize, Vec<String>, u64)> {
+pub async fn get_info_data(tl_dir: &Path) -> Result<(usize, Vec<String>, u64)> {
     // Try IPC first
     if let Ok(Some(data)) = try_get_info_via_ipc(tl_dir).await {
         return Ok(data);
@@ -61,11 +53,11 @@ pub async fn get_info_data(
 // ============================================================================
 
 /// Try to resolve checkpoint references via IPC
-async fn try_resolve_via_ipc(
-    refs: &[String],
-    tl_dir: &Path,
-) -> Result<Option<Vec<Option<Ulid>>>> {
-    let socket_path = tl_dir.join("state/daemon.sock");
+async fn try_resolve_via_ipc(refs: &[String], tl_dir: &Path) -> Result<Option<Vec<Option<Ulid>>>> {
+    let repo_root = tl_dir
+        .parent()
+        .context("Invalid Timelapse directory: missing repo root")?;
+    let socket_path = crate::util::daemon_socket_path(repo_root)?;
 
     if !socket_path.exists() {
         return Ok(None); // Daemon not running
@@ -77,7 +69,8 @@ async fn try_resolve_via_ipc(
             let checkpoints = client.resolve_checkpoint_refs(refs.to_vec()).await?;
 
             // Extract ULIDs from checkpoints
-            let ids: Vec<Option<Ulid>> = checkpoints.into_iter()
+            let ids: Vec<Option<Ulid>> = checkpoints
+                .into_iter()
                 .map(|opt_cp| opt_cp.map(|cp| cp.id))
                 .collect();
 
@@ -88,11 +81,11 @@ async fn try_resolve_via_ipc(
 }
 
 /// Try to get checkpoints via IPC
-async fn try_get_via_ipc(
-    ids: &[Ulid],
-    tl_dir: &Path,
-) -> Result<Option<Vec<Option<Checkpoint>>>> {
-    let socket_path = tl_dir.join("state/daemon.sock");
+async fn try_get_via_ipc(ids: &[Ulid], tl_dir: &Path) -> Result<Option<Vec<Option<Checkpoint>>>> {
+    let repo_root = tl_dir
+        .parent()
+        .context("Invalid Timelapse directory: missing repo root")?;
+    let socket_path = crate::util::daemon_socket_path(repo_root)?;
 
     if !socket_path.exists() {
         return Ok(None);
@@ -109,10 +102,11 @@ async fn try_get_via_ipc(
 }
 
 /// Try to get info data via IPC
-async fn try_get_info_via_ipc(
-    tl_dir: &Path,
-) -> Result<Option<(usize, Vec<String>, u64)>> {
-    let socket_path = tl_dir.join("state/daemon.sock");
+async fn try_get_info_via_ipc(tl_dir: &Path) -> Result<Option<(usize, Vec<String>, u64)>> {
+    let repo_root = tl_dir
+        .parent()
+        .context("Invalid Timelapse directory: missing repo root")?;
+    let socket_path = crate::util::daemon_socket_path(repo_root)?;
 
     if !socket_path.exists() {
         return Ok(None);
@@ -132,13 +126,9 @@ async fn try_get_info_via_ipc(
 // ============================================================================
 
 /// Resolve checkpoint references via direct journal access
-fn resolve_via_journal(
-    refs: &[String],
-    tl_dir: &Path,
-) -> Result<Vec<Option<Ulid>>> {
+fn resolve_via_journal(refs: &[String], tl_dir: &Path) -> Result<Vec<Option<Ulid>>> {
     let journal_path = tl_dir.join("journal");
-    let journal = Journal::open(&journal_path)
-        .context("Failed to open checkpoint journal")?;
+    let journal = Journal::open(&journal_path).context("Failed to open checkpoint journal")?;
 
     let pin_manager = PinManager::new(tl_dir);
     let mut results = Vec::new();
@@ -227,13 +217,9 @@ fn resolve_via_journal(
 }
 
 /// Get checkpoints via direct journal access
-fn get_via_journal(
-    ids: &[Ulid],
-    tl_dir: &Path,
-) -> Result<Vec<Option<Checkpoint>>> {
+fn get_via_journal(ids: &[Ulid], tl_dir: &Path) -> Result<Vec<Option<Checkpoint>>> {
     let journal_path = tl_dir.join("journal");
-    let journal = Journal::open(&journal_path)
-        .context("Failed to open checkpoint journal")?;
+    let journal = Journal::open(&journal_path).context("Failed to open checkpoint journal")?;
 
     let mut results = Vec::new();
     for id in ids {
@@ -245,12 +231,9 @@ fn get_via_journal(
 }
 
 /// Get info data via direct journal access
-fn get_info_via_journal(
-    tl_dir: &Path,
-) -> Result<(usize, Vec<String>, u64)> {
+fn get_info_via_journal(tl_dir: &Path) -> Result<(usize, Vec<String>, u64)> {
     let journal_path = tl_dir.join("journal");
-    let journal = Journal::open(&journal_path)
-        .context("Failed to open checkpoint journal")?;
+    let journal = Journal::open(&journal_path).context("Failed to open checkpoint journal")?;
 
     // Get total checkpoints
     let total_checkpoints = journal.count();
@@ -332,7 +315,11 @@ mod tests {
         // Test HEAD resolves to latest (cp3)
         let results = resolve_via_journal(&["HEAD".to_string()], &tl_dir).unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0], Some(cp3_id), "HEAD should resolve to latest checkpoint");
+        assert_eq!(
+            results[0],
+            Some(cp3_id),
+            "HEAD should resolve to latest checkpoint"
+        );
     }
 
     #[test]
@@ -349,7 +336,10 @@ mod tests {
         // Test HEAD on empty journal returns None
         let results = resolve_via_journal(&["HEAD".to_string()], &tl_dir).unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0], None, "HEAD should return None for empty journal");
+        assert_eq!(
+            results[0], None,
+            "HEAD should return None for empty journal"
+        );
     }
 
     #[test]
@@ -405,7 +395,11 @@ mod tests {
         let results = resolve_via_journal(&refs, &tl_dir).unwrap();
 
         assert_eq!(results.len(), 3);
-        assert_eq!(results[0], Some(cp2_id), "HEAD should resolve to latest (cp2)");
+        assert_eq!(
+            results[0],
+            Some(cp2_id),
+            "HEAD should resolve to latest (cp2)"
+        );
         assert_eq!(results[1], Some(cp1_id), "Full ULID should resolve");
         assert_eq!(results[2], None, "nonexistent should return None");
     }

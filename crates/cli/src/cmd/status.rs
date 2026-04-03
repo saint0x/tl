@@ -8,8 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub async fn run(show_remote: bool) -> Result<()> {
     // 1. Find repository root
-    let repo_root = util::find_repo_root()
-        .context("Failed to find repository")?;
+    let repo_root = util::find_repo_root().context("Failed to find repository")?;
 
     let tl_dir = repo_root.join(".tl");
 
@@ -17,13 +16,17 @@ pub async fn run(show_remote: bool) -> Result<()> {
     crate::daemon::ensure_daemon_running().await?;
 
     // 3. Connect to daemon with retry
-    let socket_path = tl_dir.join("state/daemon.sock");
+    let socket_path = crate::util::daemon_socket_path(&repo_root)?;
     let resilient_client = crate::ipc::ResilientIpcClient::new(socket_path);
-    let mut client = resilient_client.connect_with_retry().await
+    let mut client = resilient_client
+        .connect_with_retry()
+        .await
         .context("Failed to connect to daemon")?;
 
     // 4. Get all data via single batched IPC call
-    let (status, latest, checkpoint_count) = client.get_status_full().await
+    let (status, latest, checkpoint_count) = client
+        .get_status_full()
+        .await
         .context("Failed to retrieve status from daemon")?;
 
     // 5. Get storage stats
@@ -117,7 +120,10 @@ fn get_git_remote_url(repo_root: &Path) -> Option<String> {
 fn print_remote_status(repo_root: &Path) -> Result<()> {
     // Check if JJ workspace exists
     if jj::detect_jj_workspace(repo_root)?.is_none() {
-        println!("{}", "Remote: No JJ workspace (run 'tl init' first)".dimmed());
+        println!(
+            "{}",
+            "Remote: No JJ workspace (run 'tl init' first)".dimmed()
+        );
         return Ok(());
     }
 
@@ -131,7 +137,11 @@ fn print_remote_status(repo_root: &Path) -> Result<()> {
     match &remote_url {
         Some(url) => println!("Remote:  {} ({})", "origin".cyan(), url.dimmed()),
         None => {
-            println!("Remote:  {} {}", "origin".cyan(), "(not configured)".yellow());
+            println!(
+                "Remote:  {} {}",
+                "origin".cyan(),
+                "(not configured)".yellow()
+            );
             println!();
             println!("{}", "No git remote configured. Add one with:".dimmed());
             println!("  git remote add origin <url>");
@@ -168,14 +178,13 @@ fn print_remote_status(repo_root: &Path) -> Result<()> {
     println!("Branches:");
     for branch in &branches {
         let status = format_branch_status(branch);
-        let local_id = branch.local_commit_id.as_ref()
+        let local_id = branch
+            .local_commit_id
+            .as_ref()
             .map(|s| &s[..12.min(s.len())])
             .unwrap_or("(none)");
 
-        println!("  {} {} {}",
-            branch.name.cyan(),
-            local_id.dimmed(),
-            status);
+        println!("  {} {} {}", branch.name.cyan(), local_id.dimmed(), status);
     }
     println!();
 
@@ -191,20 +200,26 @@ fn format_branch_status(branch: &jj::RemoteBranchInfo) -> String {
             if local == remote {
                 "✓ up to date".green().to_string()
             } else if branch.is_diverged {
-                format!("{} {} {}",
+                format!(
+                    "{} {} {}",
                     "↑".yellow(),
                     "↓".yellow(),
-                    "diverged".red().bold())
+                    "diverged".red().bold()
+                )
             } else if branch.commits_ahead > 0 {
-                format!("{}{} {}",
+                format!(
+                    "{}{} {}",
                     "↑".green(),
                     branch.commits_ahead,
-                    "ahead".green())
+                    "ahead".green()
+                )
             } else if branch.commits_behind > 0 {
-                format!("{}{} {}",
+                format!(
+                    "{}{} {}",
                     "↓".yellow(),
                     branch.commits_behind,
-                    "behind".yellow())
+                    "behind".yellow()
+                )
             } else {
                 // Different commits but we don't know ahead/behind count yet
                 format!("{}", "differs from remote".yellow())
@@ -216,8 +231,6 @@ fn format_branch_status(branch: &jj::RemoteBranchInfo) -> String {
         (None, Some(_)) => {
             format!("{} {}", "↓".yellow(), "remote only".yellow())
         }
-        (None, None) => {
-            "(unknown)".dimmed().to_string()
-        }
+        (None, None) => "(unknown)".dimmed().to_string(),
     }
 }

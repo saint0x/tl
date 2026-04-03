@@ -39,7 +39,7 @@ tracing-appender = { workspace = true }
 tokio = { workspace = true }
 
 # IPC & System
-nix = { version = "0.27", features = ["fs", "signal"] }
+nix = { version = "0.27", features = ["fs", "signal", "user"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 bincode = { workspace = true }
@@ -54,6 +54,7 @@ tempfile = { workspace = true }
 similar = { workspace = true }
 toml = { workspace = true }
 dirs = "5.0"
+blake3 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

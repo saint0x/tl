@@ -14,16 +14,15 @@ use crate::locks::GcLock;
 use crate::system_config;
 use crate::util;
 use anyhow::{Context, Result};
-use std::collections::HashSet;
-use tl_core::Store;
 use journal::{GarbageCollector, Journal, PinManager};
 use owo_colors::OwoColorize;
+use std::collections::HashSet;
 use std::time::Duration;
+use tl_core::Store;
 
 pub async fn run() -> Result<()> {
     // 1. Find repository root
-    let repo_root = util::find_repo_root()
-        .context("Failed to find repository")?;
+    let repo_root = util::find_repo_root().context("Failed to find repository")?;
 
     let tl_dir = repo_root.join(".tl");
 
@@ -33,14 +32,17 @@ pub async fn run() -> Result<()> {
         .context("Failed to acquire GC lock - is another GC or restore in progress?")?;
 
     // 3. CRITICAL: Stop daemon before GC to avoid journal corruption
-    println!("{}", "Stopping daemon for exclusive journal access...".dimmed());
+    println!(
+        "{}",
+        "Stopping daemon for exclusive journal access...".dimmed()
+    );
 
-    let socket_path = tl_dir.join("state/daemon.sock");
+    let socket_path = crate::util::daemon_socket_path(&repo_root)?;
     let daemon_was_running = if socket_path.exists() {
         match crate::ipc::IpcClient::connect(&socket_path).await {
             Ok(mut client) => {
                 client.shutdown().await.ok(); // Send shutdown signal
-                // Wait for daemon to stop
+                                              // Wait for daemon to stop
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 true
             }
@@ -52,8 +54,7 @@ pub async fn run() -> Result<()> {
 
     // 3. Now safe to open journal with write access
     let journal_path = tl_dir.join("journal");
-    let mut journal = Journal::open(&journal_path)
-        .context("Failed to open checkpoint journal")?;
+    let mut journal = Journal::open(&journal_path).context("Failed to open checkpoint journal")?;
 
     let mut store = Store::open(&repo_root)?;
 
@@ -77,38 +78,68 @@ pub async fn run() -> Result<()> {
     };
 
     // 5. Load retention policy from system config
-    let system_config = system_config::load()
-        .unwrap_or_else(|e| {
-            tracing::warn!("Failed to load system config, using defaults: {}", e);
-            system_config::SystemConfig::default()
-        });
+    let system_config = system_config::load().unwrap_or_else(|e| {
+        tracing::warn!("Failed to load system config, using defaults: {}", e);
+        system_config::SystemConfig::default()
+    });
     let policy = system_config.gc.to_retention_policy();
     let gc = GarbageCollector::new(policy.clone());
 
     // Show retention policy
     println!("Retention policy:");
-    println!("  Keep last {} checkpoints", policy.retain_dense_count.to_string().cyan());
-    println!("  Keep all within {} hours", (policy.retain_dense_window_ms / 3600000).to_string().cyan());
-    println!("  Retain pins: {}", if policy.retain_pins { "yes".green().to_string() } else { "no".red().to_string() });
+    println!(
+        "  Keep last {} checkpoints",
+        policy.retain_dense_count.to_string().cyan()
+    );
+    println!(
+        "  Keep all within {} hours",
+        (policy.retain_dense_window_ms / 3600000).to_string().cyan()
+    );
+    println!(
+        "  Retain pins: {}",
+        if policy.retain_pins {
+            "yes".green().to_string()
+        } else {
+            "no".red().to_string()
+        }
+    );
     println!();
 
     println!("{}", "Running Garbage Collection...".bold());
     println!();
 
     // 6. Run GC with workspace checkpoint protection
-    let metrics = gc.collect(&mut journal, &mut store, &pin_manager, workspace_checkpoints.as_ref())?;
+    let metrics = gc.collect(
+        &mut journal,
+        &mut store,
+        &pin_manager,
+        workspace_checkpoints.as_ref(),
+    )?;
 
     // 7. Display results
     println!("{}", "GC Complete".green().bold());
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!();
 
-    if metrics.checkpoints_deleted == 0 && metrics.trees_deleted == 0 && metrics.blobs_deleted == 0 {
-        println!("{}", "No garbage found - repository is already clean".dimmed());
+    if metrics.checkpoints_deleted == 0 && metrics.trees_deleted == 0 && metrics.blobs_deleted == 0
+    {
+        println!(
+            "{}",
+            "No garbage found - repository is already clean".dimmed()
+        );
     } else {
-        println!("Checkpoints deleted: {}", metrics.checkpoints_deleted.to_string().yellow());
-        println!("Trees deleted:       {}", metrics.trees_deleted.to_string().yellow());
-        println!("Blobs deleted:       {}", metrics.blobs_deleted.to_string().yellow());
+        println!(
+            "Checkpoints deleted: {}",
+            metrics.checkpoints_deleted.to_string().yellow()
+        );
+        println!(
+            "Trees deleted:       {}",
+            metrics.trees_deleted.to_string().yellow()
+        );
+        println!(
+            "Blobs deleted:       {}",
+            metrics.blobs_deleted.to_string().yellow()
+        );
         println!();
         println!(
             "Space freed:         {}",

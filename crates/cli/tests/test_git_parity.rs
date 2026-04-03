@@ -28,10 +28,103 @@ fn run_tl(dir: &PathBuf, args: &[&str]) -> Result<std::process::Output> {
 
 /// Helper to run git command in a directory
 fn run_git(dir: &PathBuf, args: &[&str]) -> Result<std::process::Output> {
-    Ok(Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()?)
+    Ok(Command::new("git").args(args).current_dir(dir).output()?)
+}
+
+fn run_jj(dir: &PathBuf, args: &[&str]) -> Result<std::process::Output> {
+    Ok(Command::new("jj").args(args).current_dir(dir).output()?)
+}
+
+fn run_git_checked(dir: &PathBuf, args: &[&str]) -> Result<std::process::Output> {
+    let output = run_git(dir, args)?;
+    assert!(
+        output.status.success(),
+        "git {:?} failed\nstdout: {}\nstderr: {}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(output)
+}
+
+fn git_stdout(dir: &PathBuf, args: &[&str]) -> Result<String> {
+    let output = run_git_checked(dir, args)?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn configure_git_identity(dir: &PathBuf) -> Result<()> {
+    run_git_checked(dir, &["config", "user.email", "test@test.com"])?;
+    run_git_checked(dir, &["config", "user.name", "Test User"])?;
+    Ok(())
+}
+
+fn run_jj_checked(dir: &PathBuf, args: &[&str]) -> Result<std::process::Output> {
+    let output = run_jj(dir, args)?;
+    assert!(
+        output.status.success(),
+        "jj {:?} failed\nstdout: {}\nstderr: {}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(output)
+}
+
+fn update_jj_bookmark_to_current_commit(dir: &PathBuf, branch: &str) -> Result<()> {
+    run_jj_checked(dir, &["git", "import"])?;
+    run_jj_checked(dir, &["bookmark", "set", branch, "-r", "@-"])?;
+    Ok(())
+}
+
+fn clear_daemon_state(dir: &PathBuf) -> Result<()> {
+    let _ = run_tl(dir, &["stop"])?;
+    let socket_path = cli_lib::util::daemon_socket_path(dir)?;
+    if socket_path.exists() {
+        fs::remove_file(socket_path)?;
+    }
+    Ok(())
+}
+
+fn setup_remote_repos() -> Result<(TempDir, PathBuf, PathBuf, PathBuf)> {
+    let temp = TempDir::new()?;
+    let root = temp.path();
+
+    let remote = root.join("remote.git");
+    let seed = root.join("seed");
+    let repo1 = root.join("repo1");
+    let repo2 = root.join("repo2");
+
+    fs::create_dir_all(&seed)?;
+    run_git_checked(
+        &root.to_path_buf(),
+        &["init", "--bare", remote.to_str().unwrap()],
+    )?;
+
+    run_git_checked(&seed, &["init"])?;
+    configure_git_identity(&seed)?;
+    run_git_checked(&seed, &["checkout", "-b", "main"])?;
+    fs::write(seed.join("README.md"), "# Seed\n")?;
+    run_git_checked(&seed, &["add", "."])?;
+    run_git_checked(&seed, &["commit", "-m", "Initial commit"])?;
+    run_git_checked(
+        &seed,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    )?;
+    run_git_checked(&seed, &["push", "-u", "origin", "main"])?;
+    run_git_checked(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"])?;
+
+    run_git_checked(
+        &root.to_path_buf(),
+        &["clone", remote.to_str().unwrap(), repo1.to_str().unwrap()],
+    )?;
+    run_git_checked(
+        &root.to_path_buf(),
+        &["clone", remote.to_str().unwrap(), repo2.to_str().unwrap()],
+    )?;
+    configure_git_identity(&repo1)?;
+    configure_git_identity(&repo2)?;
+
+    Ok((temp, remote, repo1, repo2))
 }
 
 /// Initialize a test repository with git
@@ -51,9 +144,185 @@ fn init_test_repo() -> Result<(TempDir, PathBuf)> {
 
     // Initialize timelapse
     let output = run_tl(&repo_root, &["init"])?;
-    assert!(output.status.success(), "tl init failed: {:?}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "tl init failed: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     Ok((temp, repo_root))
+}
+
+#[test]
+fn test_push_refreshes_remote_state_without_daemon() -> Result<()> {
+    let (_temp, _remote, repo1, repo2) = setup_remote_repos()?;
+
+    let output = run_tl(&repo1, &["init"])?;
+    assert!(
+        output.status.success(),
+        "tl init failed: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    update_jj_bookmark_to_current_commit(&repo1, "main")?;
+    clear_daemon_state(&repo1)?;
+
+    fs::write(repo2.join("repo2.txt"), "remote change\n")?;
+    run_git_checked(&repo2, &["add", "."])?;
+    run_git_checked(&repo2, &["commit", "-m", "Remote change"])?;
+    run_git_checked(&repo2, &["push", "origin", "main"])?;
+
+    run_git_checked(&repo1, &["fetch", "origin"])?;
+    run_git_checked(&repo1, &["merge", "--ff-only", "origin/main"])?;
+    update_jj_bookmark_to_current_commit(&repo1, "main")?;
+
+    fs::write(repo1.join("repo1.txt"), "local change\n")?;
+    run_git_checked(&repo1, &["add", "."])?;
+    run_git_checked(&repo1, &["commit", "-m", "Local change"])?;
+    update_jj_bookmark_to_current_commit(&repo1, "main")?;
+
+    clear_daemon_state(&repo1)?;
+    let socket_path = cli_lib::util::daemon_socket_path(&repo1)?;
+    assert!(
+        !socket_path.exists(),
+        "push benchmark path should start without daemon"
+    );
+
+    let output = run_tl(&repo1, &["push"])?;
+    assert!(
+        output.status.success(),
+        "tl push failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !socket_path.exists(),
+        "tl push should not need to start the daemon"
+    );
+
+    run_git_checked(&repo2, &["fetch", "origin"])?;
+    let remote_head = git_stdout(&repo2, &["rev-parse", "origin/main"])?;
+    let local_head = git_stdout(&repo1, &["rev-parse", "HEAD"])?;
+    assert_eq!(remote_head, local_head, "push should update remote main");
+
+    Ok(())
+}
+
+#[test]
+fn test_push_requires_force_for_non_fast_forward() -> Result<()> {
+    let (_temp, _remote, repo1, repo2) = setup_remote_repos()?;
+
+    let output = run_tl(&repo1, &["init"])?;
+    assert!(
+        output.status.success(),
+        "tl init failed: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    update_jj_bookmark_to_current_commit(&repo1, "main")?;
+    clear_daemon_state(&repo1)?;
+
+    fs::write(repo2.join("remote-only.txt"), "remote branch moved\n")?;
+    run_git_checked(&repo2, &["add", "."])?;
+    run_git_checked(&repo2, &["commit", "-m", "Remote moved"])?;
+    run_git_checked(&repo2, &["push", "origin", "main"])?;
+    let remote_head_before = git_stdout(&repo2, &["rev-parse", "HEAD"])?;
+
+    fs::write(repo1.join("local-only.txt"), "local branch moved\n")?;
+    run_git_checked(&repo1, &["add", "."])?;
+    run_git_checked(&repo1, &["commit", "-m", "Local moved"])?;
+    update_jj_bookmark_to_current_commit(&repo1, "main")?;
+    let local_head = git_stdout(&repo1, &["rev-parse", "HEAD"])?;
+    clear_daemon_state(&repo1)?;
+
+    let output = run_tl(&repo1, &["push"])?;
+    assert!(
+        !output.status.success(),
+        "non-fast-forward push should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--force")
+            || stderr.contains("Diverged")
+            || stderr.contains("Push aborted"),
+        "stderr should explain force requirement: {}",
+        stderr
+    );
+
+    run_git_checked(&repo2, &["fetch", "origin"])?;
+    let remote_head_after_reject = git_stdout(&repo2, &["rev-parse", "origin/main"])?;
+    assert_eq!(
+        remote_head_after_reject, remote_head_before,
+        "failed push must leave remote untouched"
+    );
+
+    let output = run_tl(&repo1, &["push", "--force"])?;
+    assert!(
+        output.status.success(),
+        "force push failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    run_git_checked(&repo2, &["fetch", "origin"])?;
+    let remote_head_after_force = git_stdout(&repo2, &["rev-parse", "origin/main"])?;
+    assert_eq!(
+        remote_head_after_force, local_head,
+        "force push should update remote"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_pull_up_to_date_does_not_start_daemon() -> Result<()> {
+    let (_temp, _remote, repo1, _repo2) = setup_remote_repos()?;
+
+    let output = run_tl(&repo1, &["init"])?;
+    assert!(
+        output.status.success(),
+        "tl init failed: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    update_jj_bookmark_to_current_commit(&repo1, "main")?;
+    clear_daemon_state(&repo1)?;
+
+    clear_daemon_state(&repo1)?;
+    let socket_path = cli_lib::util::daemon_socket_path(&repo1)?;
+
+    let output = run_tl(&repo1, &["pull"])?;
+    assert!(
+        output.status.success(),
+        "tl pull failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !socket_path.exists(),
+        "up-to-date pull should not start the daemon"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_daemon_socket_path_is_short_for_deep_repos() -> Result<()> {
+    let temp = TempDir::new()?;
+    let mut deep_repo = temp.path().to_path_buf();
+    for idx in 0..12 {
+        deep_repo.push(format!("very-deep-repo-segment-{}", idx));
+    }
+    fs::create_dir_all(deep_repo.join(".tl"))?;
+
+    let socket_path = cli_lib::util::daemon_socket_path(&deep_repo)?;
+    let socket_path_str = socket_path.to_string_lossy().to_string();
+
+    assert!(
+        socket_path_str.len() < 104,
+        "socket path must stay under macOS Unix socket limit: {} ({})",
+        socket_path_str.len(),
+        socket_path_str
+    );
+
+    Ok(())
 }
 
 // =============================================================================
@@ -66,7 +335,10 @@ fn test_show_requires_checkpoint() -> Result<()> {
 
     // Try to show a non-existent checkpoint
     let output = run_tl(&repo_root, &["show", "nonexistent"])?;
-    assert!(!output.status.success(), "Should fail for non-existent checkpoint");
+    assert!(
+        !output.status.success(),
+        "Should fail for non-existent checkpoint"
+    );
 
     Ok(())
 }
@@ -89,8 +361,16 @@ fn test_show_head_checkpoint() -> Result<()> {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     // Command should succeed and show checkpoint info
-    assert!(output.status.success(), "tl show HEAD should succeed, stderr: {}", stderr);
-    assert!(stdout.contains("checkpoint") || stdout.contains("Checkpoint"), "Output: {}", stdout);
+    assert!(
+        output.status.success(),
+        "tl show HEAD should succeed, stderr: {}",
+        stderr
+    );
+    assert!(
+        stdout.contains("checkpoint") || stdout.contains("Checkpoint"),
+        "Output: {}",
+        stdout
+    );
 
     // Stop daemon
     run_tl(&repo_root, &["stop"])?;
@@ -114,8 +394,16 @@ fn test_show_with_diff_flag() -> Result<()> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert!(output.status.success(), "tl show HEAD --diff should succeed, stderr: {}", stderr);
-    assert!(stdout.contains("checkpoint") || stdout.contains("Checkpoint"), "Output: {}", stdout);
+    assert!(
+        output.status.success(),
+        "tl show HEAD --diff should succeed, stderr: {}",
+        stderr
+    );
+    assert!(
+        stdout.contains("checkpoint") || stdout.contains("Checkpoint"),
+        "Output: {}",
+        stdout
+    );
 
     // Stop daemon
     run_tl(&repo_root, &["stop"])?;
@@ -146,7 +434,11 @@ fn test_tag_create() -> Result<()> {
 
     // Create a tag
     let output = run_tl(&repo_root, &["tag", "create", "v1.0.0"])?;
-    assert!(output.status.success(), "tl tag create should succeed: {:?}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "tl tag create should succeed: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("v1.0.0") || stdout.contains("Created"));
@@ -164,8 +456,14 @@ fn test_tag_create_annotated() -> Result<()> {
     let (_temp, repo_root) = init_test_repo()?;
 
     // Create annotated tag
-    let output = run_tl(&repo_root, &["tag", "create", "v2.0.0", "-m", "Release version 2.0.0"])?;
-    assert!(output.status.success(), "tl tag create with message should succeed");
+    let output = run_tl(
+        &repo_root,
+        &["tag", "create", "v2.0.0", "-m", "Release version 2.0.0"],
+    )?;
+    assert!(
+        output.status.success(),
+        "tl tag create with message should succeed"
+    );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("annotated") || stdout.contains("v2.0.0"));
@@ -230,7 +528,10 @@ fn test_tag_delete_nonexistent_fails() -> Result<()> {
     let (_temp, repo_root) = init_test_repo()?;
 
     let output = run_tl(&repo_root, &["tag", "delete", "nonexistent"])?;
-    assert!(!output.status.success(), "Deleting nonexistent tag should fail");
+    assert!(
+        !output.status.success(),
+        "Deleting nonexistent tag should fail"
+    );
 
     Ok(())
 }
@@ -240,7 +541,10 @@ fn test_tag_show() -> Result<()> {
     let (_temp, repo_root) = init_test_repo()?;
 
     // Create tag
-    run_tl(&repo_root, &["tag", "create", "show-me", "-m", "Test message"])?;
+    run_tl(
+        &repo_root,
+        &["tag", "create", "show-me", "-m", "Test message"],
+    )?;
 
     // Show tag
     let output = run_tl(&repo_root, &["tag", "show", "show-me"])?;
@@ -293,7 +597,8 @@ fn test_stash_push() -> Result<()> {
     assert!(
         output.status.success() || stdout.contains("No changes") || stderr.contains("No changes"),
         "Stash push should succeed or report no changes, stdout: {}, stderr: {}",
-        stdout, stderr
+        stdout,
+        stderr
     );
 
     // Stop daemon
@@ -332,7 +637,10 @@ fn test_stash_drop_nonexistent() -> Result<()> {
     let (_temp, repo_root) = init_test_repo()?;
 
     let output = run_tl(&repo_root, &["stash", "drop", "stash@{99}"])?;
-    assert!(!output.status.success(), "Dropping nonexistent stash should fail");
+    assert!(
+        !output.status.success(),
+        "Dropping nonexistent stash should fail"
+    );
 
     Ok(())
 }
@@ -350,7 +658,8 @@ fn test_stash_clear_requires_confirmation_when_stashes_exist() -> Result<()> {
     assert!(
         output.status.success() || stderr.contains("Confirmation"),
         "Clear should succeed with no stashes or require confirmation, got stdout: {} stderr: {}",
-        stdout, stderr
+        stdout,
+        stderr
     );
 
     Ok(())
@@ -407,8 +716,20 @@ fn test_remote_add() -> Result<()> {
     let _ = run_git(&repo_root, &["remote", "remove", "origin"]);
 
     // Add remote
-    let output = run_tl(&repo_root, &["remote", "add", "test-remote", "https://example.com/repo.git"])?;
-    assert!(output.status.success(), "tl remote add should succeed: {:?}", String::from_utf8_lossy(&output.stderr));
+    let output = run_tl(
+        &repo_root,
+        &[
+            "remote",
+            "add",
+            "test-remote",
+            "https://example.com/repo.git",
+        ],
+    )?;
+    assert!(
+        output.status.success(),
+        "tl remote add should succeed: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Added") || stdout.contains("test-remote"));
@@ -416,7 +737,10 @@ fn test_remote_add() -> Result<()> {
     // Verify remote exists in git
     let git_output = run_git(&repo_root, &["remote", "-v"])?;
     let git_stdout = String::from_utf8_lossy(&git_output.stdout);
-    assert!(git_stdout.contains("test-remote"), "Remote should exist in git");
+    assert!(
+        git_stdout.contains("test-remote"),
+        "Remote should exist in git"
+    );
 
     Ok(())
 }
@@ -429,10 +753,21 @@ fn test_remote_add_duplicate_fails() -> Result<()> {
     let _ = run_git(&repo_root, &["remote", "remove", "origin"]);
 
     // Add remote
-    run_tl(&repo_root, &["remote", "add", "dup-remote", "https://example.com/repo.git"])?;
+    run_tl(
+        &repo_root,
+        &[
+            "remote",
+            "add",
+            "dup-remote",
+            "https://example.com/repo.git",
+        ],
+    )?;
 
     // Try to add duplicate
-    let output = run_tl(&repo_root, &["remote", "add", "dup-remote", "https://other.com/repo.git"])?;
+    let output = run_tl(
+        &repo_root,
+        &["remote", "add", "dup-remote", "https://other.com/repo.git"],
+    )?;
     assert!(!output.status.success(), "Duplicate remote should fail");
 
     Ok(())
@@ -446,7 +781,10 @@ fn test_remote_remove() -> Result<()> {
     let _ = run_git(&repo_root, &["remote", "remove", "origin"]);
 
     // Add then remove remote
-    run_tl(&repo_root, &["remote", "add", "to-remove", "https://example.com/repo.git"])?;
+    run_tl(
+        &repo_root,
+        &["remote", "add", "to-remove", "https://example.com/repo.git"],
+    )?;
 
     let output = run_tl(&repo_root, &["remote", "remove", "to-remove"])?;
     assert!(output.status.success(), "tl remote remove should succeed");
@@ -454,7 +792,10 @@ fn test_remote_remove() -> Result<()> {
     // Verify remote no longer exists
     let git_output = run_git(&repo_root, &["remote", "-v"])?;
     let git_stdout = String::from_utf8_lossy(&git_output.stdout);
-    assert!(!git_stdout.contains("to-remove"), "Remote should be removed");
+    assert!(
+        !git_stdout.contains("to-remove"),
+        "Remote should be removed"
+    );
 
     Ok(())
 }
@@ -464,7 +805,10 @@ fn test_remote_remove_nonexistent_fails() -> Result<()> {
     let (_temp, repo_root) = init_test_repo()?;
 
     let output = run_tl(&repo_root, &["remote", "remove", "nonexistent"])?;
-    assert!(!output.status.success(), "Removing nonexistent remote should fail");
+    assert!(
+        !output.status.success(),
+        "Removing nonexistent remote should fail"
+    );
 
     Ok(())
 }
@@ -477,7 +821,10 @@ fn test_remote_rename() -> Result<()> {
     let _ = run_git(&repo_root, &["remote", "remove", "origin"]);
 
     // Add remote
-    run_tl(&repo_root, &["remote", "add", "old-name", "https://example.com/repo.git"])?;
+    run_tl(
+        &repo_root,
+        &["remote", "add", "old-name", "https://example.com/repo.git"],
+    )?;
 
     // Rename
     let output = run_tl(&repo_root, &["remote", "rename", "old-name", "new-name"])?;
@@ -486,7 +833,10 @@ fn test_remote_rename() -> Result<()> {
     // Verify rename
     let git_output = run_git(&repo_root, &["remote", "-v"])?;
     let git_stdout = String::from_utf8_lossy(&git_output.stdout);
-    assert!(!git_stdout.contains("old-name"), "Old name should not exist");
+    assert!(
+        !git_stdout.contains("old-name"),
+        "Old name should not exist"
+    );
     assert!(git_stdout.contains("new-name"), "New name should exist");
 
     Ok(())
@@ -500,10 +850,16 @@ fn test_remote_set_url() -> Result<()> {
     let _ = run_git(&repo_root, &["remote", "remove", "origin"]);
 
     // Add remote
-    run_tl(&repo_root, &["remote", "add", "test", "https://old.com/repo.git"])?;
+    run_tl(
+        &repo_root,
+        &["remote", "add", "test", "https://old.com/repo.git"],
+    )?;
 
     // Update URL
-    let output = run_tl(&repo_root, &["remote", "set-url", "test", "https://new.com/repo.git"])?;
+    let output = run_tl(
+        &repo_root,
+        &["remote", "set-url", "test", "https://new.com/repo.git"],
+    )?;
     assert!(output.status.success(), "tl remote set-url should succeed");
 
     // Verify URL updated
@@ -522,7 +878,15 @@ fn test_remote_get_url() -> Result<()> {
     let _ = run_git(&repo_root, &["remote", "remove", "origin"]);
 
     // Add remote
-    run_tl(&repo_root, &["remote", "add", "get-test", "https://example.com/myrepo.git"])?;
+    run_tl(
+        &repo_root,
+        &[
+            "remote",
+            "add",
+            "get-test",
+            "https://example.com/myrepo.git",
+        ],
+    )?;
 
     // Get URL
     let output = run_tl(&repo_root, &["remote", "get-url", "get-test"])?;
@@ -542,11 +906,22 @@ fn test_remote_list_verbose() -> Result<()> {
     let _ = run_git(&repo_root, &["remote", "remove", "origin"]);
 
     // Add remote
-    run_tl(&repo_root, &["remote", "add", "verbose-test", "https://example.com/repo.git"])?;
+    run_tl(
+        &repo_root,
+        &[
+            "remote",
+            "add",
+            "verbose-test",
+            "https://example.com/repo.git",
+        ],
+    )?;
 
     // List with verbose
     let output = run_tl(&repo_root, &["remote", "list", "--verbose"])?;
-    assert!(output.status.success(), "tl remote list --verbose should succeed");
+    assert!(
+        output.status.success(),
+        "tl remote list --verbose should succeed"
+    );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("verbose-test"));
@@ -571,7 +946,9 @@ fn test_config_get_and_list() -> Result<()> {
     assert!(get_output.status.success(), "tl config get should succeed");
     let stdout = String::from_utf8_lossy(&get_output.stdout);
     // Just verify we get a numeric value, don't check specific value
-    let _value: u64 = stdout.trim().parse()
+    let _value: u64 = stdout
+        .trim()
+        .parse()
         .expect(&format!("Expected numeric value, got: {}", stdout));
 
     // Test --list shows all config keys
@@ -580,9 +957,15 @@ fn test_config_get_and_list() -> Result<()> {
         .arg("--list")
         .output()?;
 
-    assert!(list_output.status.success(), "tl config list should succeed");
+    assert!(
+        list_output.status.success(),
+        "tl config list should succeed"
+    );
     let list_stdout = String::from_utf8_lossy(&list_output.stdout);
-    assert!(list_stdout.contains("[daemon]"), "Should show daemon section");
+    assert!(
+        list_stdout.contains("[daemon]"),
+        "Should show daemon section"
+    );
     assert!(list_stdout.contains("[gc]"), "Should show gc section");
 
     Ok(())
@@ -594,14 +977,15 @@ fn test_config_set_validates_values() -> Result<()> {
     let output = Command::new(env!("CARGO_BIN_EXE_tl"))
         .arg("config")
         .arg("--set")
-        .arg("daemon.checkpoint_interval_secs=999999")  // Too high
+        .arg("daemon.checkpoint_interval_secs=999999") // Too high
         .output()?;
 
     assert!(!output.status.success(), "Should reject invalid value");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("Invalid") || stderr.contains("validation") || stderr.contains("error"),
-        "Should mention validation error: {}", stderr
+        "Should mention validation error: {}",
+        stderr
     );
 
     Ok(())
@@ -618,10 +1002,16 @@ fn test_commands_fail_without_git_repo() -> Result<()> {
 
     // Don't initialize git - commands should fail
     let output = run_tl(&repo_root, &["remote", "list"])?;
-    assert!(!output.status.success(), "remote list should fail without git repo");
+    assert!(
+        !output.status.success(),
+        "remote list should fail without git repo"
+    );
 
     let output = run_tl(&repo_root, &["tag", "list"])?;
-    assert!(!output.status.success(), "tag list should fail without git/jj repo");
+    assert!(
+        !output.status.success(),
+        "tag list should fail without git/jj repo"
+    );
 
     Ok(())
 }
